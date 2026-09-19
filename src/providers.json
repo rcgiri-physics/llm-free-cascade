@@ -1,0 +1,100 @@
+{
+  "gemini": {
+    "envVar": "GEMINI_API_KEY",
+    "apiStyle": "gemini",
+    "baseUrl": "https://generativelanguage.googleapis.com/v1beta/models",
+    "defaultModel": "gemini-2.5-flash",
+    "signupUrl": "https://aistudio.google.com",
+    "freeTierNotes": "~1500 requests/day"
+  },
+  "groq": {
+    "envVar": "GROQ_API_KEY",
+    "apiStyle": "openai-compat",
+    "baseUrl": "https://api.groq.com/openai/v1",
+    "defaultModel": "openai/gpt-oss-20b",
+    "signupUrl": "https://console.groq.com",
+    "freeTierNotes": "~14400 requests/day"
+  },
+  "cerebras": {
+    "envVar": "CEREBRAS_API_KEY",
+    "apiStyle": "openai-compat",
+    "baseUrl": "https://api.cerebras.ai/v1",
+    "defaultModel": "llama-4-scout",
+    "signupUrl": "https://inference.cerebras.ai",
+    "freeTierNotes": "free, fast Llama inference"
+  },
+  "sambanova": {
+    "envVar": "SAMBANOVA_API_KEY",
+    "apiStyle": "openai-compat",
+    "baseUrl": "https://api.sambanova.ai/v1",
+    "defaultModel": "Meta-Llama-3.3-70B-Instruct",
+    "signupUrl": "https://cloud.sambanova.ai",
+    "freeTierNotes": "free tier available"
+  },
+  "mistral": {
+    "envVar": "MISTRAL_API_KEY",
+    "apiStyle": "openai-compat",
+    "baseUrl": "https://api.mistral.ai/v1",
+    "defaultModel": "mistral-small-latest",
+    "signupUrl": "https://console.mistral.ai",
+    "freeTierNotes": "free tier, ~1 request/sec"
+  },
+  "openrouter": {
+    "envVar": "OPENROUTER_API_KEY",
+    "apiStyle": "openai-compat",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "defaultModel": "google/gemini-2.5-flash:free",
+    "signupUrl": "https://openrouter.ai",
+    "freeTierNotes": "look for model slugs ending in :free",
+    "extraHeaders": true
+  },
+  "together": {
+    "envVar": "TOGETHER_API_KEY",
+    "apiStyle": "openai-compat",
+    "baseUrl": "https://api.together.xyz/v1",
+    "defaultModel": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    "signupUrl": "https://api.together.xyz",
+    "freeTierNotes": "$1 signup credit"
+  },
+  "deepseek": {
+    "envVar": "DEEPSEEK_API_KEY",
+    "apiStyle": "openai-compat",
+    "baseUrl": "https://api.deepseek.com/v1",
+    "defaultModel": "deepseek-chat",
+    "signupUrl": "https://platform.deepseek.com",
+    "freeTierNotes": "free credits, cheap after"
+  },
+  "cohere": {
+    "envVar": "COHERE_API_KEY",
+    "apiStyle": "openai-compat",
+    "baseUrl": "https://api.cohere.ai/compatibility/v1",
+    "defaultModel": "command-r7b-12-2024",
+    "signupUrl": "https://dashboard.cohere.com/api-keys",
+    "freeTierNotes": "free trial key"
+  },
+  "huggingface": {
+    "envVar": "HUGGINGFACE_API_KEY",
+    "apiStyle": "openai-compat",
+    "baseUrl": "https://router.huggingface.co/v1",
+    "defaultModel": "meta-llama/Llama-3.1-8B-Instruct",
+    "signupUrl": "https://huggingface.co/settings/tokens",
+    "freeTierNotes": "free inference credits; backend varies by model"
+  },
+  "cloudflare": {
+    "envVar": "CLOUDFLARE_API_TOKEN",
+    "apiStyle": "openai-compat",
+    "baseUrl": null,
+    "baseUrlNote": "per-account: https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1",
+    "defaultModel": "@cf/meta/llama-3.1-8b-instruct-fast",
+    "signupUrl": "https://dash.cloudflare.com",
+    "freeTierNotes": "free inference credits (Workers AI); needs CLOUDFLARE_ACCOUNT_ID"
+  },
+  "anthropic": {
+    "envVar": "ANTHROPIC_API_KEY",
+    "apiStyle": "anthropic",
+    "baseUrl": "https://api.anthropic.com/v1/messages",
+    "defaultModel": "claude-haiku-4-5-20251001",
+    "signupUrl": "https://console.anthropic.com",
+    "freeTierNotes": "paid — intended as a last-resort tier, not free"
+  }
+}
