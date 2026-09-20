@@ -11,6 +11,9 @@ export interface LLMCascadeOptions {
   cooldownMs?: number;
   appName?: string;
   referer?: string;
+  modelResolver?: (provider: Provider) => string | null | undefined;
+  onProviderFailure?: (provider: Provider, message: string) => void;
+  onProviderCooldown?: (provider: Provider, cooldownMs: number) => void;
 }
 
 export interface GenerateParams {
@@ -36,8 +39,10 @@ export class LLMCascade {
   constructor(options?: LLMCascadeOptions);
   static fromEnv(options?: LLMCascadeOptions): LLMCascade;
   generate<T = any>(params: GenerateParams): Promise<GenerateResult<T>>;
+  getLiveOrder(): Provider[];
 }
 
 export function parseJsonLoose(text: string): any;
+export function redact(message: string): string;
 export const ALL_PROVIDERS: Provider[];
 export const DEFAULT_MODELS: Record<Provider, string>;

@@ -128,6 +128,37 @@ via `cooldownMs`) so a busy loop doesn't hammer a broken provider on every
 call. Transient errors (a single bad request, one rate-limited call) don't
 trigger a cooldown — they just move on to the next provider for that call.
 
+## Live model overrides & observability hooks
+
+For callers that resolve a model dynamically (e.g. from a DB-backed admin
+panel) instead of pinning it at construction time, pass `modelResolver`. It's
+checked before every attempt and falls back to the static `models` map (or
+the built-in default) when it returns `null`/`undefined` or throws:
+
+```js
+const cascade = new LLMCascade({
+  keys: { ... },
+  modelResolver: (provider) => getAdminOverride(provider), // return null/undefined to use the default
+});
+```
+
+`onProviderFailure`/`onProviderCooldown` let you hook logging into the
+cascade without wrapping `generate()` yourself. Messages passed to them (and
+included in the thrown `LLMCascadeError`) are redacted — see `redact()`,
+also exported — so a provider that echoes a key fragment back in its error
+body never leaks it into your logs:
+
+```js
+const cascade = new LLMCascade({
+  keys: { ... },
+  onProviderFailure: (provider, message) => logger.debug(`${provider} failed`, { message }),
+  onProviderCooldown: (provider, cooldownMs) => logger.warn(`${provider} cooling down for ${cooldownMs}ms`),
+});
+```
+
+`cascade.getLiveOrder()` returns the current provider chain with anything on
+cooldown filtered out — useful for a status page or admin UI.
+
 ## Supported providers
 
 [`src/providers.json`](src/providers.json) is the single source of truth for

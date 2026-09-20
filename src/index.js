@@ -62,6 +62,15 @@ async function extractErrorDetail(res) {
   }
 }
 
+// Strips anything that looks like a credential out of a provider error
+// message before it's logged or surfaced — a provider can echo a key
+// fragment back in its own error body.
+function redact(message) {
+  return String(message)
+    .replace(/\b(api[ _-]?key|authorization|bearer)\b(\s*[:=]?\s*)[A-Za-z0-9._-]{8,}/gi, '$1$2[redacted]')
+    .replace(/\bBearer\s+[A-Za-z0-9._-]{8,}/gi, 'Bearer [redacted]');
+}
+
 function stripFences(text) {
   return String(text)
     .replace(/^\s*```(?:json)?\s*/i, '')
@@ -224,6 +233,9 @@ function callProviderWithKey(provider, opts, apiKey, model) {
  * @property {number} [cooldownMs=600000] - how long to skip a provider after a structural failure.
  * @property {string} [appName] - sent as OpenRouter's X-Title header.
  * @property {string} [referer] - sent as OpenRouter's HTTP-Referer header.
+ * @property {(provider: string) => (string|null|undefined)} [modelResolver] - called before every attempt to resolve a live model override (e.g. from a DB/admin panel); falls back to `models[provider]` when it returns null/undefined or throws.
+ * @property {(provider: string, message: string) => void} [onProviderFailure] - called once per failed provider, before the cooldown decision.
+ * @property {(provider: string, cooldownMs: number) => void} [onProviderCooldown] - called when a provider is put on cooldown.
  */
 class LLMCascade {
   /** @param {LLMCascadeOptions} options */
@@ -233,6 +245,9 @@ class LLMCascade {
     this.appName = options.appName;
     this.referer = options.referer;
     this.cloudflareAccountId = options.cloudflareAccountId;
+    this.modelResolver = options.modelResolver;
+    this.onProviderFailure = options.onProviderFailure;
+    this.onProviderCooldown = options.onProviderCooldown;
     this.cooldownUntil = new Map();
 
     const rawKeys = options.keys || {};
@@ -282,16 +297,35 @@ class LLMCascade {
     return live.length ? live : this.order; // never starve to zero
   }
 
+  /** Public, stable view of the provider chain as of right now (skips anything currently on cooldown). */
+  getLiveOrder() {
+    return this._liveOrder();
+  }
+
   _coolDown(provider) {
     const stillLive = this._liveOrder().filter((p) => p !== provider);
     if (!stillLive.length) return; // it's all we have — keep trying it
     this.cooldownUntil.set(provider, Date.now() + this.cooldownMs);
+    if (typeof this.onProviderCooldown === 'function') {
+      try { this.onProviderCooldown(provider, this.cooldownMs); } catch { /* observability hook — never break the cascade */ }
+    }
+  }
+
+  /** Resolves the model for a provider via modelResolver (if set), falling back to the static map. A throwing/empty resolver is never fatal. */
+  _resolveModel(provider) {
+    if (typeof this.modelResolver === 'function') {
+      try {
+        const resolved = this.modelResolver(provider);
+        if (resolved) return resolved;
+      } catch { /* fall through to the static map */ }
+    }
+    return this.models[provider];
   }
 
   async _callProvider(provider, opts) {
     const keys = this.keys[provider] || [];
     if (!keys.length) throw new Error(`${provider}: no API key configured`);
-    const model = this.models[provider];
+    const model = this._resolveModel(provider);
     let lastErr;
     for (let i = 0; i < keys.length; i++) {
       try {
@@ -332,7 +366,11 @@ class LLMCascade {
         const parsed = typeof opts.parse === 'function' ? opts.parse(text) : undefined;
         return { text, parsed, provider };
       } catch (err) {
-        failures.push({ provider, message: err.message });
+        const message = redact(err.message);
+        failures.push({ provider, message });
+        if (typeof this.onProviderFailure === 'function') {
+          try { this.onProviderFailure(provider, message); } catch { /* observability hook — never break the cascade */ }
+        }
         if (isProviderLevelFailure(err.message)) this._coolDown(provider);
       }
     }
@@ -346,4 +384,4 @@ class LLMCascade {
   }
 }
 
-module.exports = { LLMCascade, LLMCascadeError, parseJsonLoose, ALL_PROVIDERS, DEFAULT_MODELS };
+module.exports = { LLMCascade, LLMCascadeError, parseJsonLoose, redact, ALL_PROVIDERS, DEFAULT_MODELS };
