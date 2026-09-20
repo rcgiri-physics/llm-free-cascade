@@ -28,6 +28,7 @@ export interface GenerateParams {
   maxTokens?: number;
   parse?: (text: string) => any;
   timeoutMs?: number;
+  stream?: boolean;
 }
 
 export interface Usage {
@@ -43,6 +44,11 @@ export interface GenerateResult<T = any> {
   usage: Usage | undefined;
 }
 
+export interface StreamResult {
+  stream: AsyncIterable<string>;
+  provider: Provider;
+}
+
 export class LLMCascadeError extends Error {
   statusCode: number;
   code: 'ALL_RATE_LIMITED' | 'ALL_PROVIDERS_FAILED' | null;
@@ -51,6 +57,7 @@ export class LLMCascadeError extends Error {
 export class LLMCascade {
   constructor(options?: LLMCascadeOptions);
   static fromEnv(options?: LLMCascadeOptions): LLMCascade;
+  generate(params: GenerateParams & { stream: true }): Promise<StreamResult>;
   generate<T = any>(params: GenerateParams): Promise<GenerateResult<T>>;
   getLiveOrder(): Promise<Provider[]>;
 }

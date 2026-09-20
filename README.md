@@ -120,6 +120,27 @@ const cascade = new LLMCascade({
 });
 ```
 
+## Streaming
+
+Pass `stream: true` to get chunks back as they arrive instead of waiting for
+the full response. `generate()` returns `{ stream, provider }` — a distinct
+shape from the non-streaming `{ text, ... }` result — where `stream` is an
+async iterable of text chunks:
+
+```js
+const { stream, provider } = await cascade.generate({ system, user, stream: true });
+for await (const chunk of stream) {
+  process.stdout.write(chunk);
+}
+```
+
+Fallback only happens *before* the first chunk arrives — a provider that
+errors immediately (bad key, HTTP error) still falls through to the next one
+in the chain, same as non-streaming. Once a chunk has been yielded to you,
+there's no further fallback (there's no way to un-send partial output).
+Stopping the loop early (`break`) or letting it throw always releases the
+underlying stream reader — nothing is left dangling.
+
 ## Provider cooldown
 
 If a provider fails with a structural error (bad model name, no content,

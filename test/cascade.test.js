@@ -152,3 +152,83 @@ test('a custom cooldownStore is used instead of the in-memory default', async (t
   await assert.rejects(() => cascade.generate({ system: 's', user: 'u' }));
   assert.ok(store.get('groq') > Date.now(), 'cooldown should be recorded in the custom store');
 });
+
+/** Builds a fetch Response-alike whose body is an SSE stream of the given OpenAI-style delta chunks. */
+function sseResponse(chunks) {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) {
+        const payload = chunk === '[DONE]' ? '[DONE]' : JSON.stringify({ choices: [{ delta: { content: chunk } }] });
+        controller.enqueue(encoder.encode(`data: ${payload}\n\n`));
+      }
+      controller.close();
+    },
+  });
+  return { ok: true, status: 200, body };
+}
+
+async function collect(asyncIterable) {
+  const out = [];
+  for await (const chunk of asyncIterable) out.push(chunk);
+  return out;
+}
+
+test('streaming yields chunks in order and stops at [DONE]', async (t) => {
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+  global.fetch = async () => sseResponse(['Hel', 'lo', ' world', '[DONE]']);
+
+  const cascade = new LLMCascade({ keys: { groq: 'k1' }, order: ['groq'] });
+  const { provider, stream } = await cascade.generate({ system: 's', user: 'u', stream: true });
+  assert.equal(provider, 'groq');
+  assert.deepEqual(await collect(stream), ['Hel', 'lo', ' world']);
+});
+
+test('streaming falls over to the next provider if the first one fails before any chunk', async (t) => {
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+  let calls = 0;
+  global.fetch = async () => {
+    calls++;
+    if (calls === 1) return { ok: false, status: 500, json: async () => ({ error: { message: 'no content' } }) };
+    return sseResponse(['ok', '[DONE]']);
+  };
+
+  const cascade = new LLMCascade({ keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'] });
+  const { provider, stream } = await cascade.generate({ system: 's', user: 'u', stream: true });
+  assert.equal(provider, 'cerebras');
+  assert.deepEqual(await collect(stream), ['ok']);
+});
+
+test('breaking out of a stream early releases the reader (no dangling read)', async (t) => {
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+  let releaseLockCalls = 0;
+  const encoder = new TextEncoder();
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: 'a' } }] })}\n\n`));
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: 'b' } }] })}\n\n`));
+      // deliberately never closes — simulates a stream the consumer abandons mid-way
+    },
+  });
+  const originalGetReader = body.getReader.bind(body);
+  body.getReader = (...args) => {
+    const reader = originalGetReader(...args);
+    const originalRelease = reader.releaseLock.bind(reader);
+    reader.releaseLock = (...a) => { releaseLockCalls++; return originalRelease(...a); };
+    return reader;
+  };
+  global.fetch = async () => ({ ok: true, status: 200, body });
+
+  const cascade = new LLMCascade({ keys: { groq: 'k1' }, order: ['groq'] });
+  const { stream } = await cascade.generate({ system: 's', user: 'u', stream: true });
+  const chunks = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+    if (chunks.length === 1) break; // abandon after the first chunk
+  }
+  assert.deepEqual(chunks, ['a']);
+  assert.equal(releaseLockCalls, 1);
+});
