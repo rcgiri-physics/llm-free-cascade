@@ -35,12 +35,33 @@ const PROVIDER_ENV = Object.fromEntries(
   Object.entries(PROVIDERS_META).map(([provider, meta]) => [provider, meta.envVar])
 );
 
+const DEFAULT_TIMEOUT_MS = 30 * 1000;
+const DEFAULT_MAX_TOKENS = 1024;
+// Upper bound on how much of a provider's error body we keep. Everything
+// downstream (redact, hooks, the thrown error) is sized by this.
+const MAX_ERROR_DETAIL_CHARS = 2000;
+// Longest message redact() will scan. Anything past this is noise, and
+// bounding the input is what keeps the regex pass linear-time in practice.
+const MAX_REDACT_CHARS = 8192;
+// A single SSE event larger than this is not a chat-completion delta — it's
+// a misbehaving upstream. Bounding the buffer keeps a provider that never
+// sends an event boundary from growing our heap without limit.
+const MAX_SSE_EVENT_BYTES = 1024 * 1024;
+
 class LLMCascadeError extends Error {
-  constructor(message, statusCode = 502, code = null) {
+  /**
+   * @param {string} message
+   * @param {number} [statusCode=502]
+   * @param {string|null} [code=null]
+   * @param {{provider: string, message: string}[]} [failures=[]] - per-provider
+   *   redacted failure messages. Log these; don't forward them to end users.
+   */
+  constructor(message, statusCode = 502, code = null, failures = []) {
     super(message);
     this.name = 'LLMCascadeError';
     this.statusCode = statusCode;
     this.code = code;
+    this.failures = failures;
   }
 }
 
@@ -54,21 +75,68 @@ function isProviderLevelFailure(message = '') {
   return /MAX_TOKENS|no content|HTTP 4\d\d|unknown provider|no API key/i.test(message);
 }
 
-const DEFAULT_TIMEOUT_MS = 30 * 1000;
+/** A rate-limit / quota failure — cooled down for `rateLimitCooldownMs` rather than the structural `cooldownMs`. */
+function isRateLimitFailure(message = '') {
+  return /\b429\b|quota|rate.?limit/i.test(message);
+}
+
+/** A usable timeout in ms: finite and positive, otherwise the default. `0`/negative/NaN are treated as "not set", not "no timeout". */
+function resolveTimeout(timeoutMs) {
+  return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS;
+}
+
+/** A usable max_tokens: a positive integer, optionally clamped to `limit`, otherwise the default. */
+function resolveMaxTokens(maxTokens, limit) {
+  let n = Number.isFinite(maxTokens) && maxTokens > 0 ? Math.floor(maxTokens) : DEFAULT_MAX_TOKENS;
+  if (Number.isFinite(limit) && limit > 0) n = Math.min(n, Math.floor(limit));
+  return n;
+}
+
+/** A promise that rejects with an AbortError when `signal` fires (never resolves). */
+function abortRejection(signal) {
+  return new Promise((_, reject) => {
+    const onAbort = () => reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
+    if (signal.aborted) return onAbort();
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function timeoutMessage(err, ms) {
+  return err && err.name === 'AbortError' ? `timed out after ${ms}ms` : err.message;
+}
 
 /**
- * fetch() with a hard timeout. The AbortController/timer are always torn
- * down in `finally` — on success, on a provider error, and on the timeout
- * itself — so nothing (listener, timer) is left attached past this call.
+ * POST + parse JSON with a hard timeout that covers the WHOLE exchange —
+ * connect, headers, and reading/parsing the body. (Clearing the timer once
+ * headers arrive would let a provider that sends `200 OK` and then stalls the
+ * body hang the cascade forever, with no fallover.) The AbortController/timer
+ * are always torn down in `finally`.
+ *
+ * Errors are prefixed with the provider name so key-rotation/cooldown logic
+ * and the final aggregated error read the same for every provider:
+ *   `<provider> network error: ...`  — DNS/TCP/TLS failure or timeout
+ *   `<provider> HTTP <status>: ...`  — non-2xx, with the provider's own detail
  */
-async function fetchWithTimeout(url, options, timeoutMs) {
+async function fetchJson(provider, url, options, timeoutMs) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const ms = resolveTimeout(timeoutMs);
+  const timer = setTimeout(() => controller.abort(), ms);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } catch (err) {
-    if (err.name === 'AbortError') throw new Error(`timed out after ${timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`);
-    throw err;
+    let res;
+    try {
+      res = await fetch(url, { ...options, signal: controller.signal });
+    } catch (err) {
+      throw new Error(`${provider} network error: ${timeoutMessage(err, ms)}`);
+    }
+    if (!res.ok) throw new Error(`${provider} HTTP ${res.status}: ${await extractErrorDetail(res)}`);
+    try {
+      // Raced against the abort signal, so the timeout holds even if a body
+      // implementation ignores the signal it was given.
+      return await Promise.race([res.json(), abortRejection(controller.signal)]);
+    } catch (err) {
+      if (err && err.name === 'AbortError') throw new Error(`${provider} network error: ${timeoutMessage(err, ms)}`);
+      throw new Error(`${provider} returned an unparseable response body`);
+    }
   } finally {
     clearTimeout(timer);
   }
@@ -77,36 +145,65 @@ async function fetchWithTimeout(url, options, timeoutMs) {
 /**
  * Streams an SSE (`text/event-stream`) response, yielding each `data:`
  * payload as a raw string (skipping `[DONE]`, comments, and non-data lines).
+ *
+ * Timeouts are per-*read*, not per-stream: `firstByteMs` bounds the wait for
+ * the response headers, then `idleMs` is re-armed after every chunk, so a
+ * long generation that keeps producing tokens is never cut off, but a stream
+ * that goes quiet is. Either timeout surfaces as `timed out after …ms` so the
+ * consumer can tell it apart from a provider error.
+ *
  * The AbortController/timer/reader are always released in `finally` —
  * whether the stream ends naturally, errors, or the consumer stops
  * iterating early (a `break` in a `for await` loop calls this generator's
  * `.return()`, which runs `finally` just like a thrown error would) — so an
  * abandoned stream never leaks an open reader/socket.
  */
-async function* streamSSE(url, options, timeoutMs) {
+async function* streamSSE(url, options, { firstByteMs, idleMs }) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const connectMs = resolveTimeout(firstByteMs);
+  const quietMs = resolveTimeout(idleMs);
+  let timer = setTimeout(() => controller.abort(), connectMs);
+  const rearm = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(), quietMs);
+  };
+
   let res;
   try {
     res = await fetch(url, { ...options, signal: controller.signal });
   } catch (err) {
     clearTimeout(timer);
-    if (err.name === 'AbortError') throw new Error(`timed out after ${timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`);
-    throw err;
+    throw new Error(`network error: ${timeoutMessage(err, connectMs)}`);
   }
   if (!res.ok) {
+    const detail = await extractErrorDetail(res); // read while the timer is still armed
     clearTimeout(timer);
-    throw new Error(`HTTP ${res.status}: ${await extractErrorDetail(res)}`);
+    throw new Error(`HTTP ${res.status}: ${detail}`);
+  }
+  if (!res.body) {
+    clearTimeout(timer);
+    throw new Error('returned an empty response body');
   }
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let gotData = false;
   try {
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      let chunk;
+      try {
+        chunk = await reader.read();
+      } catch (err) {
+        throw new Error(`network error: ${timeoutMessage(err, gotData ? quietMs : connectMs)}`);
+      }
+      if (chunk.done) break;
+      gotData = true;
+      rearm();
+      buffer += decoder.decode(chunk.value, { stream: true });
+      if (buffer.length > MAX_SSE_EVENT_BYTES) {
+        throw new Error(`SSE event exceeded ${MAX_SSE_EVENT_BYTES} bytes without a boundary`);
+      }
       let boundary;
       while ((boundary = buffer.indexOf('\n\n')) !== -1) {
         const rawEvent = buffer.slice(0, boundary);
@@ -129,26 +226,48 @@ async function* streamSSE(url, options, timeoutMs) {
 async function extractErrorDetail(res) {
   try {
     const body = await res.json();
-    return body?.error?.message || body?.message || `HTTP ${res.status}`;
+    const detail = body?.error?.message || body?.message;
+    return detail ? String(detail).slice(0, MAX_ERROR_DETAIL_CHARS) : `HTTP ${res.status}`;
   } catch {
     return `HTTP ${res.status}`;
   }
 }
 
-// Strips anything that looks like a credential out of a provider error
-// message before it's logged or surfaced — a provider can echo a key
-// fragment back in its own error body.
-function redact(message) {
-  return String(message)
-    .replace(/\b(api[ _-]?key|authorization|bearer)\b(\s*[:=]?\s*)[A-Za-z0-9._-]{8,}/gi, '$1$2[redacted]')
-    .replace(/\bBearer\s+[A-Za-z0-9._-]{8,}/gi, 'Bearer [redacted]');
+/**
+ * Strips anything that looks like a credential out of a provider error
+ * message before it's logged or surfaced — a provider can echo a key
+ * fragment back in its own error body.
+ *
+ * Two passes: (1) every literal in `secrets` (the cascade passes the keys it
+ * actually holds — deterministic, catches any phrasing), then (2) a
+ * keyword-shaped fallback for tokens we don't know about. The regexes use
+ * bounded whitespace classes (`[ \t]{0,4}`) rather than `\s*`, and the input
+ * is capped at MAX_REDACT_CHARS, so the pass stays linear — two adjacent
+ * unbounded `\s*` on a long run of spaces is a quadratic-backtracking DoS.
+ */
+function redact(message, secrets = []) {
+  let out = String(message).slice(0, MAX_REDACT_CHARS);
+  for (const secret of secrets) {
+    if (typeof secret === 'string' && secret.length >= 4 && out.includes(secret)) {
+      out = out.split(secret).join('[redacted]');
+    }
+  }
+  return out
+    .replace(/\b(api[ _-]?key|authorization|bearer)\b([ \t]{0,4}[:=]?[ \t]{0,4})[A-Za-z0-9._-]{8,}/gi, '$1$2[redacted]')
+    .replace(/\bBearer[ \t]{1,4}[A-Za-z0-9._-]{8,}/gi, 'Bearer [redacted]');
 }
 
+// Plain string ops instead of `/\s*```\s*$/` — that regex is quadratic on a
+// long whitespace tail (each start position re-scans to the end).
 function stripFences(text) {
-  return String(text)
-    .replace(/^\s*```(?:json)?\s*/i, '')
-    .replace(/\s*```\s*$/i, '')
-    .trim();
+  let s = String(text).trim();
+  if (s.startsWith('```')) {
+    s = s.slice(3);
+    if (s.slice(0, 4).toLowerCase() === 'json') s = s.slice(4);
+    s = s.trimStart();
+  }
+  if (s.endsWith('```')) s = s.slice(0, -3).trimEnd();
+  return s;
 }
 
 /**
@@ -196,28 +315,50 @@ function normalizeUsage(u) {
   return { promptTokens: prompt, completionTokens: completion, totalTokens: total };
 }
 
-async function callGemini({ system, user, json, maxTokens, apiKey, model, timeoutMs }) {
+// ---- request-body builders (shared by the blocking and streaming callers) ----
+
+function geminiBody({ system, user, json, maxTokens }) {
   const body = {
     system_instruction: { parts: [{ text: system }] },
     contents: [{ role: 'user', parts: [{ text: user }] }],
-    generationConfig: { maxOutputTokens: maxTokens || 1024 },
+    generationConfig: { maxOutputTokens: maxTokens },
   };
   if (json) body.generationConfig.responseMimeType = 'application/json';
+  return body;
+}
 
+function openAICompatBody({ system, user, json, maxTokens, model, stream }) {
+  const body = {
+    model,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ],
+    max_tokens: maxTokens,
+  };
+  if (json) body.response_format = { type: 'json_object' };
+  if (stream) body.stream = true;
+  return body;
+}
+
+function anthropicBody({ system, user, json, schema, maxTokens, model, stream }) {
+  const body = { model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] };
+  if (json && schema) body.output_config = { format: { type: 'json_schema', schema } };
+  if (stream) body.stream = true;
+  return body;
+}
+
+const jsonHeaders = (auth) => ({ 'content-type': 'application/json', ...auth });
+
+async function callGemini(opts) {
+  const { apiKey, model, attemptTimeoutMs } = opts;
   const url = `${PROVIDERS_META.gemini.baseUrl}/${encodeURIComponent(model)}:generateContent`;
-  let res;
-  try {
-    res = await fetchWithTimeout(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
-      body: JSON.stringify(body),
-    }, timeoutMs);
-  } catch (err) {
-    throw new Error(`gemini network error: ${err.message}`);
-  }
-  if (!res.ok) throw new Error(`gemini HTTP ${res.status}: ${await extractErrorDetail(res)}`);
+  const data = await fetchJson('gemini', url, {
+    method: 'POST',
+    headers: jsonHeaders({ 'x-goog-api-key': apiKey }),
+    body: JSON.stringify(geminiBody(opts)),
+  }, attemptTimeoutMs);
 
-  const data = await res.json();
   const candidate = data.candidates?.[0];
   const text = (candidate?.content?.parts || []).map((p) => p.text || '').join('').trim();
   if (!text) {
@@ -228,63 +369,45 @@ async function callGemini({ system, user, json, maxTokens, apiKey, model, timeou
 }
 
 /** Shared OpenAI-compatible caller (Groq, Cerebras, SambaNova, Mistral, OpenRouter, Together, DeepSeek, Cohere, HF, Cloudflare). */
-async function callOpenAICompat({ system, user, json, maxTokens, baseUrl, model, apiKey, provider, extraHeaders, timeoutMs }) {
-  const body = {
-    model,
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ],
-    max_tokens: maxTokens || 1024,
-  };
-  if (json) body.response_format = { type: 'json_object' };
+async function callOpenAICompat(opts) {
+  const { baseUrl, apiKey, provider, extraHeaders, attemptTimeoutMs } = opts;
+  const data = await fetchJson(provider, `${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: jsonHeaders({ authorization: `Bearer ${apiKey}`, ...extraHeaders }),
+    body: JSON.stringify(openAICompatBody(opts)),
+  }, attemptTimeoutMs);
 
-  let res;
-  try {
-    res = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}`, ...extraHeaders },
-      body: JSON.stringify(body),
-    }, timeoutMs);
-  } catch (err) {
-    throw new Error(`${provider} network error: ${err.message}`);
-  }
-  if (!res.ok) throw new Error(`${provider} HTTP ${res.status}: ${await extractErrorDetail(res)}`);
-
-  const data = await res.json();
   const text = (data.choices?.[0]?.message?.content || '').trim();
   if (!text) throw new Error(`${provider} returned an empty response`);
   return { text, usage: normalizeUsage(data.usage) };
 }
 
-async function callAnthropic({ system, user, json, schema, maxTokens, apiKey, model, timeoutMs }) {
-  const body = { model, max_tokens: maxTokens || 1024, system, messages: [{ role: 'user', content: user }] };
-  if (json && schema) body.output_config = { format: { type: 'json_schema', schema } };
+async function callAnthropic(opts) {
+  const { apiKey, attemptTimeoutMs } = opts;
+  const data = await fetchJson('anthropic', PROVIDERS_META.anthropic.baseUrl, {
+    method: 'POST',
+    headers: jsonHeaders({ 'x-api-key': apiKey, 'anthropic-version': ANTHROPIC_VERSION }),
+    body: JSON.stringify(anthropicBody(opts)),
+  }, attemptTimeoutMs);
 
-  let res;
-  try {
-    res = await fetchWithTimeout(PROVIDERS_META.anthropic.baseUrl, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': ANTHROPIC_VERSION },
-      body: JSON.stringify(body),
-    }, timeoutMs);
-  } catch (err) {
-    throw new Error(`anthropic network error: ${err.message}`);
-  }
-  if (!res.ok) throw new Error(`anthropic HTTP ${res.status}: ${await extractErrorDetail(res)}`);
-
-  const data = await res.json();
   const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
   if (!text) throw new Error('anthropic returned an empty response');
   return { text, usage: normalizeUsage(data.usage) };
 }
 
+// Cloudflare account IDs are 32 hex chars. The ID is spliced into a URL
+// path, so anything else (a `../`, a `?`) would redirect the bearer token to
+// an attacker-chosen path on the same host — reject it rather than encode it.
+const CLOUDFLARE_ACCOUNT_ID_RE = /^[a-f0-9]{32}$/i;
+
 /** Shared per-provider setup (Cloudflare's per-account base URL, OpenRouter's extra headers) used by both the non-streaming and streaming openai-compat callers. */
 function resolveOpenAICompatTarget(provider, meta, opts) {
   let baseUrl = meta.baseUrl;
   if (provider === 'cloudflare') {
-    if (!opts.cloudflareAccountId) throw new Error('cloudflare: cloudflareAccountId is required');
-    baseUrl = `https://api.cloudflare.com/client/v4/accounts/${opts.cloudflareAccountId}/ai/v1`;
+    const id = opts.cloudflareAccountId;
+    if (!id) throw new Error('cloudflare: cloudflareAccountId is required');
+    if (!CLOUDFLARE_ACCOUNT_ID_RE.test(String(id))) throw new Error('cloudflare: cloudflareAccountId must be a 32-character hex account ID');
+    baseUrl = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(id)}/ai/v1`;
   }
   const extraHeaders = meta.extraHeaders
     ? { 'HTTP-Referer': opts.referer || 'https://github.com', 'X-Title': opts.appName || 'llm-free-cascade' }
@@ -319,21 +442,17 @@ function callProviderWithKey(provider, opts, apiKey, model) {
   return Promise.reject(new Error(`${provider}: unknown apiStyle "${meta.apiStyle}"`));
 }
 
-async function* streamGemini({ system, user, json, maxTokens, apiKey, model, timeoutMs }) {
-  const body = {
-    system_instruction: { parts: [{ text: system }] },
-    contents: [{ role: 'user', parts: [{ text: user }] }],
-    generationConfig: { maxOutputTokens: maxTokens || 1024 },
-  };
-  if (json) body.generationConfig.responseMimeType = 'application/json';
+const streamTimeouts = (opts) => ({ firstByteMs: opts.attemptTimeoutMs ?? opts.timeoutMs, idleMs: opts.timeoutMs });
 
+async function* streamGemini(opts) {
+  const { apiKey, model } = opts;
   const url = `${PROVIDERS_META.gemini.baseUrl}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
   try {
     for await (const payload of streamSSE(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
-      body: JSON.stringify(body),
-    }, timeoutMs)) {
+      headers: jsonHeaders({ 'x-goog-api-key': apiKey }),
+      body: JSON.stringify(geminiBody(opts)),
+    }, streamTimeouts(opts))) {
       let data;
       try { data = JSON.parse(payload); } catch { continue; }
       const text = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
@@ -345,24 +464,14 @@ async function* streamGemini({ system, user, json, maxTokens, apiKey, model, tim
 }
 
 /** Shared streaming caller for the OpenAI-compatible providers — same SSE `choices[0].delta.content` shape across all of them. */
-async function* streamOpenAICompat({ system, user, json, maxTokens, baseUrl, model, apiKey, provider, extraHeaders, timeoutMs }) {
-  const body = {
-    model,
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ],
-    max_tokens: maxTokens || 1024,
-    stream: true,
-  };
-  if (json) body.response_format = { type: 'json_object' };
-
+async function* streamOpenAICompat(opts) {
+  const { baseUrl, apiKey, provider, extraHeaders } = opts;
   try {
     for await (const payload of streamSSE(`${baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}`, ...extraHeaders },
-      body: JSON.stringify(body),
-    }, timeoutMs)) {
+      headers: jsonHeaders({ authorization: `Bearer ${apiKey}`, ...extraHeaders }),
+      body: JSON.stringify(openAICompatBody({ ...opts, stream: true })),
+    }, streamTimeouts(opts))) {
       let data;
       try { data = JSON.parse(payload); } catch { continue; }
       const delta = data.choices?.[0]?.delta?.content;
@@ -373,14 +482,14 @@ async function* streamOpenAICompat({ system, user, json, maxTokens, baseUrl, mod
   }
 }
 
-async function* streamAnthropic({ system, user, maxTokens, apiKey, model, timeoutMs }) {
-  const body = { model, max_tokens: maxTokens || 1024, system, messages: [{ role: 'user', content: user }], stream: true };
+async function* streamAnthropic(opts) {
+  const { apiKey } = opts;
   try {
     for await (const payload of streamSSE(PROVIDERS_META.anthropic.baseUrl, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': ANTHROPIC_VERSION },
-      body: JSON.stringify(body),
-    }, timeoutMs)) {
+      headers: jsonHeaders({ 'x-api-key': apiKey, 'anthropic-version': ANTHROPIC_VERSION }),
+      body: JSON.stringify(anthropicBody({ ...opts, stream: true })),
+    }, streamTimeouts(opts))) {
       let data;
       try { data = JSON.parse(payload); } catch { continue; }
       if (data.type === 'content_block_delta' && data.delta?.type === 'text_delta') yield data.delta.text;
@@ -409,14 +518,17 @@ function streamProviderWithKey(provider, opts, apiKey, model) {
 /**
  * @typedef {Object} LLMCascadeOptions
  * @property {Object<string,string|string[]>} keys - provider -> API key(s). A provider with no key is skipped.
- * @property {string[]} [order] - provider order to try. Defaults to all providers that have a key, in registry order.
+ * @property {string[]} [order] - provider order to try. Defaults to all providers that have a key, in registry order. Duplicates are ignored.
  * @property {Object<string,string>} [models] - provider -> model name override.
- * @property {string} [cloudflareAccountId] - required only if using the cloudflare provider.
+ * @property {string} [cloudflareAccountId] - required only if using the cloudflare provider (32-char hex account ID).
  * @property {number} [cooldownMs=600000] - how long to skip a provider after a structural failure.
+ * @property {number} [rateLimitCooldownMs] - how long to skip a provider after a rate-limit/quota failure (429) on its last key. Defaults to `cooldownMs`; set it lower when your providers' limits are per-minute rather than per-day.
+ * @property {number} [deadlineMs] - total time budget for one `generate()` call across every provider it tries. Without it, the worst case is `timeoutMs` × (number of providers). Exceeding it throws an LLMCascadeError with code `DEADLINE_EXCEEDED`.
+ * @property {number} [maxTokensLimit] - hard ceiling applied to every call's `maxTokens`, so a caller-supplied value can never exceed it (cost control when `maxTokens` comes from an untrusted request).
  * @property {string} [appName] - sent as OpenRouter's X-Title header.
  * @property {string} [referer] - sent as OpenRouter's HTTP-Referer header.
- * @property {number} [timeoutMs=30000] - default per-attempt fetch timeout; overridable per-call via `generate({ timeoutMs })`. A timeout is treated as a normal provider failure (cascade moves to the next provider).
- * @property {{get: (provider: string) => (number|Promise<number>), set: (provider: string, until: number) => (void|Promise<void>)}} [cooldownStore] - where cooldown timestamps live. Defaults to an in-memory Map (per-instance only); pass a shared store (e.g. Redis-backed) to coordinate cooldowns across processes/instances.
+ * @property {number} [timeoutMs=30000] - default per-attempt fetch timeout (covers connect + headers + body); overridable per-call via `generate({ timeoutMs })`. For streams it's the time-to-first-byte and then an idle timeout re-armed after every chunk. A timeout is treated as a normal provider failure (cascade moves to the next provider). Non-positive/non-finite values fall back to the default.
+ * @property {{get: (provider: string) => (number|Promise<number>), set: (provider: string, until: number) => (void|Promise<void>), getMany?: (providers: string[]) => (number[]|Promise<number[]>)}} [cooldownStore] - where cooldown timestamps live. Defaults to an in-memory Map (per-instance only); pass a shared store (e.g. Redis-backed) to coordinate cooldowns across processes/instances. An optional `getMany` lets a remote store answer for the whole chain in one round-trip.
  * @property {(provider: string) => (string|null|undefined)} [modelResolver] - called before every attempt to resolve a live model override (e.g. from a DB/admin panel); falls back to `models[provider]` when it returns null/undefined or throws.
  * @property {(provider: string, message: string) => void} [onProviderFailure] - called once per failed provider, before the cooldown decision.
  * @property {(provider: string, cooldownMs: number) => void} [onProviderCooldown] - called when a provider is put on cooldown.
@@ -426,6 +538,9 @@ class LLMCascade {
   constructor(options = {}) {
     this.models = { ...DEFAULT_MODELS, ...(options.models || {}) };
     this.cooldownMs = options.cooldownMs ?? 10 * 60 * 1000;
+    this.rateLimitCooldownMs = options.rateLimitCooldownMs ?? this.cooldownMs;
+    this.deadlineMs = options.deadlineMs;
+    this.maxTokensLimit = options.maxTokensLimit;
     this.appName = options.appName;
     this.referer = options.referer;
     this.cloudflareAccountId = options.cloudflareAccountId;
@@ -448,8 +563,13 @@ class LLMCascade {
       if (!v) continue;
       this.keys[provider] = Array.isArray(v) ? v.filter(Boolean) : [v].filter(Boolean);
     }
+    // Every key we hold, so redaction can scrub the literal value from any
+    // provider error regardless of how the provider phrased it.
+    this._secrets = Object.values(this.keys).flat();
 
-    this.order = (options.order || ALL_PROVIDERS).filter((p) => this.keys[p]?.length);
+    // De-duplicated: `order: ['groq', 'groq']` (easy to do via LLM_PROVIDER_ORDER)
+    // would otherwise make the same provider fail twice per call.
+    this.order = [...new Set(options.order || ALL_PROVIDERS)].filter((p) => this.keys[p]?.length);
   }
 
   /**
@@ -482,10 +602,20 @@ class LLMCascade {
     });
   }
 
+  /** Scrubs the keys this instance holds, then anything else that looks like a credential. */
+  _redact(message) {
+    return redact(message, this._secrets);
+  }
+
   async _liveOrder() {
     const now = Date.now();
-    const untils = await Promise.all(this.order.map((p) => this.cooldownStore.get(p)));
-    const live = this.order.filter((p, i) => (untils[i] || 0) <= now);
+    const store = this.cooldownStore;
+    // One round-trip for the whole chain when the store supports it (Redis
+    // MGET etc.); otherwise N parallel gets.
+    const untils = typeof store.getMany === 'function'
+      ? await store.getMany(this.order)
+      : await Promise.all(this.order.map((p) => store.get(p)));
+    const live = this.order.filter((p, i) => (untils?.[i] || 0) <= now);
     return live.length ? live : this.order; // never starve to zero
   }
 
@@ -494,13 +624,20 @@ class LLMCascade {
     return this._liveOrder();
   }
 
-  async _coolDown(provider) {
-    const stillLive = (await this._liveOrder()).filter((p) => p !== provider);
-    if (!stillLive.length) return; // it's all we have — keep trying it
-    await this.cooldownStore.set(provider, Date.now() + this.cooldownMs);
+  /**
+   * @param {string} provider
+   * @param {string[]} stillLive - providers in this call's chain not yet cooled down (re-used instead of re-querying the store per failure).
+   * @param {string} message - the (raw) failure message, to pick the cooldown length.
+   * @returns {Promise<boolean>} whether a cooldown was recorded.
+   */
+  async _coolDown(provider, stillLive, message) {
+    if (!stillLive.some((p) => p !== provider)) return false; // it's all we have — keep trying it
+    const ms = isRateLimitFailure(message) ? this.rateLimitCooldownMs : this.cooldownMs;
+    await this.cooldownStore.set(provider, Date.now() + ms);
     if (typeof this.onProviderCooldown === 'function') {
-      try { this.onProviderCooldown(provider, this.cooldownMs); } catch { /* observability hook — never break the cascade */ }
+      try { this.onProviderCooldown(provider, ms); } catch { /* observability hook — never break the cascade */ }
     }
+    return true;
   }
 
   /** Resolves the model for a provider via modelResolver (if set), falling back to the static map. A throwing/empty resolver is never fatal. */
@@ -533,11 +670,12 @@ class LLMCascade {
 
   /**
    * Streaming counterpart of _callProvider. Pulls the FIRST chunk before
-   * returning so a provider that fails immediately (bad key, HTTP error)
-   * still participates in fallback/key-rotation exactly like the
-   * non-streaming path — once a first chunk is in hand, the rest of that
-   * provider's stream is handed to the caller with no further fallback
-   * (there's no way to un-send partial output already yielded).
+   * returning so a provider that fails immediately (bad key, HTTP error,
+   * or a stream that closes without ever producing text) still participates
+   * in fallback/key-rotation exactly like the non-streaming path — once a
+   * first chunk is in hand, the rest of that provider's stream is handed to
+   * the caller with no further fallback (there's no way to un-send partial
+   * output already yielded).
    */
   async _startStream(provider, opts) {
     const keys = this.keys[provider] || [];
@@ -549,6 +687,9 @@ class LLMCascade {
       let first;
       try {
         first = await gen.next();
+        // Mirrors the non-streaming "returned an empty response" — without
+        // this an empty stream would count as success and block fallback.
+        if (first.done) throw new Error(`${provider} returned an empty response`);
       } catch (err) {
         lastErr = err;
         if (i < keys.length - 1 && isKeyExhaustedError(err.message)) continue;
@@ -564,7 +705,7 @@ class LLMCascade {
           // cleanup propagates into `gen` regardless of which yield point
           // the consumer abandons the stream at.
           try {
-            if (!first.done) yield first.value;
+            yield first.value;
             yield* gen;
           } finally {
             if (typeof gen.return === 'function') {
@@ -577,27 +718,52 @@ class LLMCascade {
     throw lastErr;
   }
 
-  /** Shared cascade loop: tries `attempt(provider)` down the live chain, redacting/reporting/cooling-down on failure, until one succeeds or all have failed. */
-  async _runCascade(chain, attempt) {
+  /**
+   * Shared cascade loop: tries `attempt(provider, attemptTimeoutMs)` down the
+   * live chain, redacting/reporting/cooling-down on failure, until one
+   * succeeds or all have failed. `attemptTimeoutMs` is the per-attempt
+   * timeout shrunk to whatever is left of `deadlineMs`, so the whole call —
+   * not just each attempt — is bounded.
+   */
+  async _runCascade(chain, attempt, timeoutMs) {
     const failures = [];
+    const perAttemptMs = resolveTimeout(timeoutMs);
+    const hasDeadline = Number.isFinite(this.deadlineMs) && this.deadlineMs > 0;
+    const deadline = hasDeadline ? Date.now() + this.deadlineMs : Infinity;
+    // Shrinks as providers are cooled down during this call, so the last one
+    // standing is never cooled (there'd be nothing left for the next call).
+    let stillLive = chain;
+
     for (const provider of chain) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new LLMCascadeError(
+          `Deadline of ${this.deadlineMs}ms exceeded after ${failures.length} provider(s). ${describe(failures)}`,
+          504,
+          'DEADLINE_EXCEEDED',
+          failures
+        );
+      }
       try {
-        return await attempt(provider);
+        return await attempt(provider, Math.min(perAttemptMs, remaining));
       } catch (err) {
-        const message = redact(err.message);
+        const message = this._redact(err.message);
         failures.push({ provider, message });
         if (typeof this.onProviderFailure === 'function') {
           try { this.onProviderFailure(provider, message); } catch { /* observability hook — never break the cascade */ }
         }
-        if (isProviderLevelFailure(err.message)) await this._coolDown(provider);
+        if (isProviderLevelFailure(err.message) && await this._coolDown(provider, stillLive, err.message)) {
+          stillLive = stillLive.filter((p) => p !== provider);
+        }
       }
     }
 
     const allRateLimited = failures.every((f) => f.message.includes('429'));
     throw new LLMCascadeError(
-      `All providers failed. ${failures.map((f) => `${f.provider}: ${f.message}`).join(' | ')}`,
+      `All providers failed. ${describe(failures)}`,
       allRateLimited ? 429 : 502,
-      allRateLimited ? 'ALL_RATE_LIMITED' : 'ALL_PROVIDERS_FAILED'
+      allRateLimited ? 'ALL_RATE_LIMITED' : 'ALL_PROVIDERS_FAILED',
+      failures
     );
   }
 
@@ -607,7 +773,7 @@ class LLMCascade {
    * @param {string} params.system - system prompt
    * @param {string} params.user - user message
    * @param {boolean} [params.json] - request a JSON response (provider-native JSON mode where available)
-   * @param {number} [params.maxTokens]
+   * @param {number} [params.maxTokens] - clamped to the instance's `maxTokensLimit` if one is set
    * @param {(text: string) => any} [params.parse] - if given, a provider whose output fails this is treated as a failure and the cascade moves on (ignored when `stream` is true)
    * @param {number} [params.timeoutMs] - per-attempt fetch timeout override for this call
    * @param {boolean} [params.stream] - return `{ stream, provider }` (an async iterable of text chunks) instead of `{ text, ... }`. A provider that fails before its first chunk still falls over to the next one; once a chunk has been yielded there's no further fallback.
@@ -618,28 +784,35 @@ class LLMCascade {
     if (!chain.length) {
       throw new LLMCascadeError(
         `No provider is configured. Pass at least one key in "keys", or set an env var: ${Object.values(PROVIDER_ENV).join(', ')}.`,
-        503
+        503,
+        null
       );
     }
 
+    const timeoutMs = resolveTimeout(params.timeoutMs ?? this.timeoutMs);
     const opts = {
       ...params,
+      maxTokens: resolveMaxTokens(params.maxTokens, this.maxTokensLimit),
       appName: this.appName,
       referer: this.referer,
       cloudflareAccountId: this.cloudflareAccountId,
-      timeoutMs: params.timeoutMs ?? this.timeoutMs,
+      timeoutMs,
     };
 
     if (opts.stream) {
-      return this._runCascade(chain, (provider) => this._startStream(provider, opts));
+      return this._runCascade(chain, (provider, attemptTimeoutMs) => this._startStream(provider, { ...opts, attemptTimeoutMs }), timeoutMs);
     }
 
-    return this._runCascade(chain, async (provider) => {
-      const { text, usage } = await this._callProvider(provider, opts);
+    return this._runCascade(chain, async (provider, attemptTimeoutMs) => {
+      const { text, usage } = await this._callProvider(provider, { ...opts, attemptTimeoutMs });
       const parsed = typeof opts.parse === 'function' ? opts.parse(text) : undefined;
       return { text, parsed, provider, usage };
-    });
+    }, timeoutMs);
   }
+}
+
+function describe(failures) {
+  return failures.map((f) => `${f.provider}: ${f.message}`).join(' | ');
 }
 
 module.exports = {

@@ -9,8 +9,15 @@ export interface LLMCascadeOptions {
   models?: Partial<Record<Provider, string>>;
   cloudflareAccountId?: string;
   cooldownMs?: number;
+  /** Cooldown after a rate-limit/quota (429) failure on a provider's last key. Defaults to `cooldownMs`. */
+  rateLimitCooldownMs?: number;
+  /** Total time budget for one generate() call across every provider tried. Exceeding it throws `DEADLINE_EXCEEDED`. */
+  deadlineMs?: number;
+  /** Hard ceiling applied to every call's `maxTokens`, for cost control when it comes from an untrusted request. */
+  maxTokensLimit?: number;
   appName?: string;
   referer?: string;
+  /** Per-attempt timeout covering connect + headers + body. For streams: time-to-first-byte, then an idle timeout re-armed per chunk. */
   timeoutMs?: number;
   modelResolver?: (provider: Provider) => string | null | undefined;
   onProviderFailure?: (provider: Provider, message: string) => void;
@@ -18,6 +25,8 @@ export interface LLMCascadeOptions {
   cooldownStore?: {
     get(provider: Provider): number | Promise<number>;
     set(provider: Provider, until: number): void | Promise<void>;
+    /** Optional: answer for the whole chain in one round-trip (e.g. Redis MGET). */
+    getMany?(providers: Provider[]): number[] | Promise<number[]>;
   };
 }
 
@@ -49,9 +58,17 @@ export interface StreamResult {
   provider: Provider;
 }
 
+export interface ProviderFailure {
+  provider: Provider;
+  /** Redacted. Safe to log; not meant to be forwarded to end users. */
+  message: string;
+}
+
 export class LLMCascadeError extends Error {
   statusCode: number;
-  code: 'ALL_RATE_LIMITED' | 'ALL_PROVIDERS_FAILED' | null;
+  code: 'ALL_RATE_LIMITED' | 'ALL_PROVIDERS_FAILED' | 'DEADLINE_EXCEEDED' | null;
+  /** One entry per provider attempted, in order. */
+  failures: ProviderFailure[];
 }
 
 export class LLMCascade {
@@ -63,7 +80,8 @@ export class LLMCascade {
 }
 
 export function parseJsonLoose(text: string): any;
-export function redact(message: string): string;
+/** Scrubs credential-looking tokens from a message. Pass `secrets` (literal key values) for deterministic redaction regardless of phrasing. */
+export function redact(message: string, secrets?: string[]): string;
 export const ALL_PROVIDERS: Provider[];
 export const DEFAULT_MODELS: Record<Provider, string>;
 

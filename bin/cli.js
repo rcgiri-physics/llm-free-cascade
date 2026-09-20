@@ -33,16 +33,32 @@ function providerStatuses() {
   }));
 }
 
+// Only plain https URLs with an unsurprising character set. The Windows
+// branch below hands the URL to `cmd /c start`, and cmd re-parses its own
+// command line — so `&`, `|`, `^`, `%` inside a URL would become shell
+// syntax. providers.json is bundled and trusted, but a contributor adding a
+// signupUrl with a query string shouldn't be one typo away from running a
+// command on every user's machine.
+const SAFE_URL_RE = /^https:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[A-Za-z0-9._~\/-]*)?$/;
+
 function openUrl(url) {
+  const fallback = () => console.log(`  (couldn't auto-open — visit ${url} manually)`);
+  if (!SAFE_URL_RE.test(url)) return fallback();
+
   const platform = process.platform;
   const [cmd, args] =
     platform === 'win32' ? ['cmd', ['/c', 'start', '""', url]] :
     platform === 'darwin' ? ['open', [url]] :
     ['xdg-open', [url]];
   try {
-    spawn(cmd, args, { stdio: 'ignore', detached: true }).unref();
+    const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
+    // spawn() reports a missing binary (ENOENT — e.g. no xdg-open on a bare
+    // server) asynchronously via 'error', not by throwing; without a
+    // listener that becomes an uncaught exception and kills the CLI.
+    child.on('error', fallback);
+    child.unref();
   } catch {
-    console.log(`  (couldn't auto-open — visit ${url} manually)`);
+    fallback();
   }
 }
 

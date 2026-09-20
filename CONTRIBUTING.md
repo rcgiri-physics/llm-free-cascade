@@ -30,10 +30,23 @@ free-tier model. This is a **one-file change**:
 npm test
 ```
 
-The test suite doesn't make real network calls — it only exercises
-config/parsing logic (provider ordering, key rotation, `parseJsonLoose`). If
-you want to sanity-check a live provider, use `examples/basic.js` with a real
-key.
+The test suite doesn't make real network calls — `fetch` is stubbed, and the
+tests exercise config/parsing logic (provider ordering, key rotation,
+`parseJsonLoose`), timeouts, streaming, redaction, and cooldowns. If you want
+to sanity-check a live provider, use `examples/basic.js` with a real key.
+
+A few things the tests guard that are easy to regress:
+
+- **Regexes that touch provider output must be linear.** `redact()` and
+  `stripFences()` use bounded whitespace classes on capped input; two
+  adjacent unbounded `\s*` on a long run of spaces is a quadratic-backtracking
+  DoS (it was 150 s on 200 KB before the fix).
+- **Timeouts cover the body, not just the headers**, and for streams they're
+  per-chunk (idle), not per-stream.
+- **The last live provider is never put on cooldown.**
+- **`signupUrl`s in `providers.json`** must be plain `https://host/path` — the
+  CLI hands them to the OS shell to open a browser and refuses anything with a
+  query string or shell metacharacters.
 
 ## Reporting a provider outage / model retirement
 
