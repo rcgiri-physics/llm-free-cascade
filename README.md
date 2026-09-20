@@ -3,9 +3,9 @@
 Call an LLM without paying for it. `llm-free-cascade` tries a chat completion
 across a chain of providers — Gemini, Groq, Cerebras, SambaNova, Mistral,
 OpenRouter, Together AI, DeepSeek, Cohere, Hugging Face, Cloudflare Workers
-AI, Z.ai (Zhipu), NVIDIA NIM, and OpenCode Zen all have (or had) a usable
-free tier — and falls through to the next one whenever the current one is
-rate-limited, out of quota, or errors.
+AI, Z.ai (Zhipu), NVIDIA NIM, OpenCode Zen, and Pollinations all have (or
+had) a usable free tier — and falls through to the next one whenever the
+current one is rate-limited, out of quota, or errors.
 An optional paid provider (Anthropic) can sit at the end of the chain as a
 last resort.
 
@@ -44,6 +44,32 @@ providers' own docs (`GEMINI_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`, …):
 ```js
 const cascade = LLMCascade.fromEnv();
 ```
+
+## Multi-turn conversations
+
+`user` is sugar for a single-turn message. For real chat history, pass
+`messages` instead — an array of `{ role: 'user' | 'assistant', content }` —
+and it's translated to whatever shape each provider's wire format expects
+(Gemini's `contents`/`model` role, Anthropic's native `messages`, or the
+OpenAI-compatible `messages` array everyone else uses):
+
+```js
+const { text } = await cascade.generate({
+  system: 'You are a helpful assistant.',
+  messages: [
+    { role: 'user', content: 'What is the capital of Nepal?' },
+    { role: 'assistant', content: 'Kathmandu.' },
+    { role: 'user', content: 'And its population?' },
+  ],
+});
+```
+
+`messages` is validated strictly before anything is sent: roles must be
+`user` or `assistant` (a client-supplied `system` turn is rejected, not
+forwarded — your `system` prompt stays the only one), content must be a
+non-empty string, the first turn must be `user`, and any extra fields are
+dropped. A bad history rejects with an `INVALID_INPUT` error (status 400)
+without touching a provider, so it can't put one on cooldown.
 
 ## Multiple free keys per provider
 
@@ -99,6 +125,15 @@ const cascade = new LLMCascade({
 
 `fromEnv()` also reads `LLM_PROVIDER_ORDER` (comma-separated) for the same effect.
 
+The instance-level `order` is the default for every call; override it for a
+single call instead by passing `order` to `generate()`. Providers without a
+configured key are dropped, and it falls back to the instance's default order
+if the override ends up empty:
+
+```js
+await cascade.generate({ system, user, order: ['cerebras', 'groq'] }); // just this call
+```
+
 ## Overriding models
 
 Free-tier model line-ups change without notice. Override per provider:
@@ -123,6 +158,21 @@ const cascade = new LLMCascade({
 
 The account ID is spliced into a URL path, so it's validated as a 32-character
 hex string and anything else is rejected before a request is made.
+
+## Gemini: disabling "thinking"
+
+`gemini-2.5-flash` thinks by default, spending part of its output budget on
+reasoning before it writes anything else — which can starve a short,
+deterministic call (classification, tagging, a yes/no) into `MAX_TOKENS`
+before it ever produces the answer. Pass `noThinking: true` to zero out its
+thinking budget for calls that don't benefit from it. Every other provider
+ignores the flag. Only set it for models that allow thinking to be disabled
+(`gemini-2.5-flash`, `-flash-lite`) — `gemini-2.5-pro` rejects a zero
+budget with a 400, which counts as a provider failure:
+
+```js
+await cascade.generate({ system, user: 'Classify this as spam or not spam.', noThinking: true });
+```
 
 ## Streaming
 
@@ -170,6 +220,14 @@ const cascade = new LLMCascade({
 > traffic to the paid one until the cooldown expires. Keep
 > `rateLimitCooldownMs` short and set `maxTokensLimit` (below) if that's a
 > concern.
+
+To end a cooldown early — e.g. after your own out-of-band health check
+confirms a provider is back — call `clearCooldown(provider)` instead of
+waiting out the rest of `cooldownMs`/`rateLimitCooldownMs`:
+
+```js
+await cascade.clearCooldown('groq');
+```
 
 Cooldown state lives in an in-memory `Map` by default, which is per-process.
 If you're running multiple instances/serverless invocations and want them to
@@ -224,8 +282,8 @@ When every provider in the chain has failed, `generate()` rejects with an
 
 | field | meaning |
 |---|---|
-| `code` | `ALL_PROVIDERS_FAILED`, `ALL_RATE_LIMITED` (every failure was a 429), `DEADLINE_EXCEEDED`, or `null` (no provider configured) |
-| `statusCode` | a suggested HTTP status for the caller: 502, 429, 504, or 503 respectively |
+| `code` | `ALL_PROVIDERS_FAILED`, `ALL_RATE_LIMITED` (every failure was a 429), `DEADLINE_EXCEEDED`, `INVALID_INPUT` (bad `messages`/missing `user` — thrown before any provider is called), or `null` (no provider configured) |
+| `statusCode` | a suggested HTTP status for the caller: 502, 429, 504, 400, or 503 respectively |
 | `failures` | `[{ provider, message }]`, one per provider attempted, in order — redacted (see below) |
 | `message` | a one-line summary joining all `failures` |
 
@@ -246,7 +304,19 @@ const cascade = new LLMCascade({ keys: { ... }, maxTokensLimit: 2048 });
 await cascade.generate({ system, user, maxTokens: 1_000_000 }); // sent as 2048
 ```
 
-`timeoutMs` has no such cap — don't take it from untrusted input.
+`timeoutMs` has no such cap — don't take it from untrusted input. The same
+goes for the per-call `order`: a client that can choose the chain can route
+its own request straight to your paid last-resort provider, so decide the
+order server-side. `messages` *is* designed to be built from a client's
+history — it's validated and rebuilt (see "Multi-turn conversations") — but
+its total length isn't capped here, so bound it in your app if input-token
+cost matters.
+
+Note that any HTTP 4xx from a provider (once every key for it has been
+tried) puts that provider on cooldown, since a bad model name or a revoked
+key will recur for every call. A request-specific 400 — e.g. a history that
+exceeds the model's context window — triggers the same cooldown, so keep
+per-request inputs within limits the provider will accept.
 
 ## Usage reporting
 
@@ -257,6 +327,29 @@ doesn't):
 ```js
 const { text, provider, usage } = await cascade.generate({ system, user });
 console.log(usage); // { promptTokens: 10, completionTokens: 5, totalTokens: 15 }
+```
+
+When `providers.json` has a known list price for the winning provider,
+`generate()` also returns an approximate `shadowCostUsd` — what this call
+would have cost had it gone to a paid tier, for cost-awareness dashboards.
+It's `undefined` whenever usage or a known price isn't available (most free
+providers here have no meaningful paid comparison), and it's an estimate at
+time of writing, not a real charge:
+
+```js
+const { usage, shadowCostUsd } = await cascade.generate({ system, user });
+console.log(shadowCostUsd); // e.g. 0.0000075, or undefined
+```
+
+## Debugging fallbacks
+
+Every result — streaming or not — includes `attempts`: the providers tried
+and skipped *before* the one that succeeded, each with its (redacted)
+failure message. Empty when the first provider tried succeeded:
+
+```js
+const { provider, attempts } = await cascade.generate({ system, user });
+if (attempts.length) console.log(`fell back past ${attempts.map((a) => a.provider).join(', ')} to reach ${provider}`);
 ```
 
 ## Live model overrides & observability hooks
@@ -317,6 +410,7 @@ any dispatch logic (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 | Z.ai (Zhipu) | `ZHIPU_API_KEY` | open.bigmodel.cn |
 | NVIDIA NIM | `NVIDIA_API_KEY` | build.nvidia.com |
 | OpenCode Zen | `OPENCODE_API_KEY` | opencode.ai/zen |
+| Pollinations | `POLLINATIONS_API_KEY` | auth.pollinations.ai (the API accepts anonymous calls at 1 req/15s, but the cascade only includes a provider it has a key for) |
 | Anthropic (paid, last resort) | `ANTHROPIC_API_KEY` | console.anthropic.com |
 
 Free tiers, model names, and pricing change over time — this table (and

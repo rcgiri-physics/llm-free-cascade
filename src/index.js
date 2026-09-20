@@ -8,8 +8,8 @@
  *
  * Supported providers: gemini, groq, cerebras, sambanova, mistral, openrouter,
  * together, deepseek, cohere, huggingface, cloudflare, zhipu, nvidia,
- * opencode, anthropic (paid, intended as a last-resort tier rather than a
- * free one).
+ * opencode, pollinations, anthropic (paid, intended as a last-resort tier
+ * rather than a free one).
  *
  * Zero dependencies — uses global fetch (Node 18+).
  */
@@ -315,25 +315,72 @@ function normalizeUsage(u) {
   return { promptTokens: prompt, completionTokens: completion, totalTokens: total };
 }
 
+/**
+ * Normalizes {user, messages} into a non-empty `{role, content}[]`. `user` is
+ * sugar for a single-turn `[{role: 'user', content: user}]`; `messages`
+ * (when given) wins outright, so a caller building real multi-turn history
+ * doesn't need to also pass `user`.
+ */
+function normalizeMessages({ user, messages }) {
+  if (Array.isArray(messages) && messages.length) return validateMessages(messages);
+  if (typeof user === 'string') return [{ role: 'user', content: user }];
+  throw invalidInput('generate() requires either "user" (a string) or a non-empty "messages" array');
+}
+
+const MESSAGE_ROLES = new Set(['user', 'assistant']);
+
+/**
+ * `messages` is the one param a host app is likely to build from a client's
+ * request body, so it's validated strictly and rebuilt as fresh
+ * `{role, content}` objects rather than forwarded verbatim:
+ *  - role must be `user` or `assistant`. Anything else — a client-supplied
+ *    `system` turn that would override the app's own system prompt, `tool`,
+ *    `developer` — is rejected, not coerced.
+ *  - content must be a non-empty string. Object/array content (image URLs
+ *    the provider would fetch, tool results) isn't supported here.
+ *  - extra fields (`name`, `tool_calls`, …) are dropped, never forwarded.
+ *  - the first turn must be `user` (Anthropic and Gemini require it).
+ * A malformed history fails fast with INVALID_INPUT instead of becoming a
+ * provider 4xx — which would count as a provider-level failure and put that
+ * provider on cooldown for everyone.
+ */
+function validateMessages(messages) {
+  const out = messages.map((m, i) => {
+    if (!m || typeof m !== 'object') throw invalidInput(`messages[${i}] must be an object`);
+    if (!MESSAGE_ROLES.has(m.role)) throw invalidInput(`messages[${i}].role must be "user" or "assistant"`);
+    if (typeof m.content !== 'string' || !m.content.trim()) throw invalidInput(`messages[${i}].content must be a non-empty string`);
+    return { role: m.role, content: m.content };
+  });
+  if (out[0].role !== 'user') throw invalidInput('messages[0].role must be "user"');
+  return out;
+}
+
+function invalidInput(message) {
+  return new LLMCascadeError(message, 400, 'INVALID_INPUT');
+}
+
 // ---- request-body builders (shared by the blocking and streaming callers) ----
 
-function geminiBody({ system, user, json, maxTokens }) {
+function geminiBody({ system, messages, json, maxTokens, noThinking }) {
   const body = {
     system_instruction: { parts: [{ text: system }] },
-    contents: [{ role: 'user', parts: [{ text: user }] }],
+    // Gemini's wire format calls the assistant turn "model", not "assistant".
+    contents: messages.map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
     generationConfig: { maxOutputTokens: maxTokens },
   };
   if (json) body.generationConfig.responseMimeType = 'application/json';
+  // gemini-2.5-flash "thinks" by default, spending the output budget on
+  // reasoning before any JSON — which can starve short structured calls into
+  // MAX_TOKENS. `noThinking` disables it for deterministic/classification
+  // tasks that don't benefit from it.
+  if (noThinking) body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
   return body;
 }
 
-function openAICompatBody({ system, user, json, maxTokens, model, stream }) {
+function openAICompatBody({ system, messages, json, maxTokens, model, stream }) {
   const body = {
     model,
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ],
+    messages: [{ role: 'system', content: system }, ...messages],
     max_tokens: maxTokens,
   };
   if (json) body.response_format = { type: 'json_object' };
@@ -341,8 +388,8 @@ function openAICompatBody({ system, user, json, maxTokens, model, stream }) {
   return body;
 }
 
-function anthropicBody({ system, user, json, schema, maxTokens, model, stream }) {
-  const body = { model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] };
+function anthropicBody({ system, messages, json, schema, maxTokens, model, stream }) {
+  const body = { model, max_tokens: maxTokens, system, messages };
   if (json && schema) body.output_config = { format: { type: 'json_schema', schema } };
   if (stream) body.stream = true;
   return body;
@@ -569,7 +616,7 @@ class LLMCascade {
 
     // De-duplicated: `order: ['groq', 'groq']` (easy to do via LLM_PROVIDER_ORDER)
     // would otherwise make the same provider fail twice per call.
-    this.order = [...new Set(options.order || ALL_PROVIDERS)].filter((p) => this.keys[p]?.length);
+    this.order = this._withKeys(options.order || ALL_PROVIDERS);
   }
 
   /**
@@ -602,26 +649,52 @@ class LLMCascade {
     });
   }
 
+  /**
+   * De-duplicated provider list restricted to providers we hold a key for.
+   * Own-property check, not `this.keys[p]?.length`: an `order` built from a
+   * request body could name `constructor` (Object.prototype.constructor has
+   * a `.length`), which would otherwise pass the filter and show up as a
+   * phantom failed attempt.
+   */
+  _withKeys(order) {
+    return [...new Set(order)].filter((p) => typeof p === 'string' && Object.hasOwn(this.keys, p) && this.keys[p].length);
+  }
+
   /** Scrubs the keys this instance holds, then anything else that looks like a credential. */
   _redact(message) {
     return redact(message, this._secrets);
   }
 
-  async _liveOrder() {
+  /** Cooldown-filtered view of an arbitrary provider list (used for both the instance's default order and a per-call `order` override). */
+  async _liveOrderFor(order) {
     const now = Date.now();
     const store = this.cooldownStore;
     // One round-trip for the whole chain when the store supports it (Redis
     // MGET etc.); otherwise N parallel gets.
     const untils = typeof store.getMany === 'function'
-      ? await store.getMany(this.order)
-      : await Promise.all(this.order.map((p) => store.get(p)));
-    const live = this.order.filter((p, i) => (untils?.[i] || 0) <= now);
-    return live.length ? live : this.order; // never starve to zero
+      ? await store.getMany(order)
+      : await Promise.all(order.map((p) => store.get(p)));
+    const live = order.filter((p, i) => (untils?.[i] || 0) <= now);
+    return live.length ? live : order; // never starve to zero
+  }
+
+  async _liveOrder() {
+    return this._liveOrderFor(this.order);
   }
 
   /** Public, stable view of the provider chain as of right now (skips anything currently on cooldown). */
   getLiveOrder() {
     return this._liveOrder();
+  }
+
+  /**
+   * Manually clear a provider's cooldown early — e.g. after your own
+   * out-of-band health check confirms it's back online, rather than waiting
+   * out the rest of `cooldownMs`. A no-op if it wasn't on cooldown.
+   * @param {string} provider
+   */
+  async clearCooldown(provider) {
+    await this.cooldownStore.set(provider, 0);
   }
 
   /**
@@ -724,6 +797,11 @@ class LLMCascade {
    * succeeds or all have failed. `attemptTimeoutMs` is the per-attempt
    * timeout shrunk to whatever is left of `deadlineMs`, so the whole call —
    * not just each attempt — is bounded.
+   *
+   * On success, `attempt`'s resolved object is returned with an `attempts`
+   * field spliced in: the (redacted) failures of every provider tried
+   * *before* the winner, for callers who want to see/log the fallback path
+   * without wrapping `generate()` themselves.
    */
   async _runCascade(chain, attempt, timeoutMs) {
     const failures = [];
@@ -745,7 +823,8 @@ class LLMCascade {
         );
       }
       try {
-        return await attempt(provider, Math.min(perAttemptMs, remaining));
+        const result = await attempt(provider, Math.min(perAttemptMs, remaining));
+        return { ...result, attempts: failures };
       } catch (err) {
         const message = this._redact(err.message);
         failures.push({ provider, message });
@@ -771,16 +850,24 @@ class LLMCascade {
    * Run a chat completion across the provider chain until one succeeds.
    * @param {Object} params
    * @param {string} params.system - system prompt
-   * @param {string} params.user - user message
+   * @param {string} [params.user] - single-turn user message. Ignored if `messages` is given; one of the two is required.
+   * @param {{role: 'user'|'assistant', content: string}[]} [params.messages] - full conversation history, for multi-turn calls. Takes precedence over `user` when both are given.
    * @param {boolean} [params.json] - request a JSON response (provider-native JSON mode where available)
    * @param {number} [params.maxTokens] - clamped to the instance's `maxTokensLimit` if one is set
+   * @param {boolean} [params.noThinking] - Gemini only: disables "thinking" (`thinkingConfig: { thinkingBudget: 0 }`) for deterministic/structured calls that don't need it and would otherwise risk MAX_TOKENS. Ignored by every other provider.
    * @param {(text: string) => any} [params.parse] - if given, a provider whose output fails this is treated as a failure and the cascade moves on (ignored when `stream` is true)
    * @param {number} [params.timeoutMs] - per-attempt fetch timeout override for this call
+   * @param {string[]} [params.order] - override the provider chain for just this call (providers without a configured key are dropped; falls back to the instance's default order if empty/omitted).
    * @param {boolean} [params.stream] - return `{ stream, provider }` (an async iterable of text chunks) instead of `{ text, ... }`. A provider that fails before its first chunk still falls over to the next one; once a chunk has been yielded there's no further fallback.
-   * @returns {Promise<{text: string, parsed: any, provider: string, usage: ({promptTokens: number, completionTokens: number, totalTokens: number}|undefined)} | {stream: AsyncIterable<string>, provider: string}>}
+   * @returns {Promise<{text: string, parsed: any, provider: string, usage: ({promptTokens: number, completionTokens: number, totalTokens: number}|undefined), shadowCostUsd: (number|undefined), attempts: {provider: string, message: string}[]} | {stream: AsyncIterable<string>, provider: string, attempts: {provider: string, message: string}[]}>}
    */
   async generate(params) {
-    const chain = await this._liveOrder();
+    const messages = normalizeMessages(params);
+
+    const requestedOrder = Array.isArray(params.order) && params.order.length
+      ? this._withKeys(params.order)
+      : this.order;
+    const chain = await this._liveOrderFor(requestedOrder);
     if (!chain.length) {
       throw new LLMCascadeError(
         `No provider is configured. Pass at least one key in "keys", or set an env var: ${Object.values(PROVIDER_ENV).join(', ')}.`,
@@ -792,6 +879,7 @@ class LLMCascade {
     const timeoutMs = resolveTimeout(params.timeoutMs ?? this.timeoutMs);
     const opts = {
       ...params,
+      messages,
       maxTokens: resolveMaxTokens(params.maxTokens, this.maxTokensLimit),
       appName: this.appName,
       referer: this.referer,
@@ -806,7 +894,11 @@ class LLMCascade {
     return this._runCascade(chain, async (provider, attemptTimeoutMs) => {
       const { text, usage } = await this._callProvider(provider, { ...opts, attemptTimeoutMs });
       const parsed = typeof opts.parse === 'function' ? opts.parse(text) : undefined;
-      return { text, parsed, provider, usage };
+      const costPerMillionTokens = PROVIDERS_META[provider]?.costPerMillionTokens;
+      const shadowCostUsd = usage?.totalTokens != null && costPerMillionTokens != null
+        ? (usage.totalTokens / 1e6) * costPerMillionTokens
+        : undefined;
+      return { text, parsed, provider, usage, shadowCostUsd };
     }, timeoutMs);
   }
 }
