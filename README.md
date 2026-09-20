@@ -251,6 +251,30 @@ Free tiers, model names, and pricing change over time — this table (and
 Override `models`/`order` at runtime, or send a PR updating `providers.json`,
 as providers change their line-up.
 
+## Get more free keys
+
+The library doesn't hand out keys itself — but it knows where to send you.
+Run the bundled CLI to see which providers you're missing and go sign up:
+
+```bash
+npx llm-free-cascade keys
+```
+
+Prints a ✓/✗ table against your current environment, and for anything
+missing, the signup URL and a one-line note on the free tier. Two optional
+flags:
+
+```bash
+npx llm-free-cascade keys --open   # opens every missing provider's signup page in your browser
+npx llm-free-cascade keys --env    # appends a commented-out line per missing var to ./.env
+```
+
+This never creates accounts or signs anything up for you — it only opens
+pages and writes placeholder lines you fill in yourself. It's driven by
+[`src/providers.json`](src/providers.json) at runtime (also exported as
+`PROVIDER_INFO`), so a provider added there later shows up in the CLI with
+no code changes.
+
 ### Scaling past one free-tier account
 
 Free tiers are almost always rate-limited **per account**, not per app. If

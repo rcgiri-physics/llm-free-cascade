@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { LLMCascade, parseJsonLoose, redact } = require('../src/index.js');
+const { LLMCascade, parseJsonLoose, redact, PROVIDER_INFO, ALL_PROVIDERS } = require('../src/index.js');
 
 test('throws when no provider is configured', async () => {
   const cascade = new LLMCascade({ keys: {} });
@@ -231,4 +231,13 @@ test('breaking out of a stream early releases the reader (no dangling read)', as
   }
   assert.deepEqual(chunks, ['a']);
   assert.equal(releaseLockCalls, 1);
+});
+
+test('PROVIDER_INFO carries a signupUrl and freeTierNotes for every provider (what the keys CLI reads)', () => {
+  for (const provider of ALL_PROVIDERS) {
+    const info = PROVIDER_INFO[provider];
+    assert.ok(info.envVar, `${provider} is missing envVar`);
+    assert.ok(info.signupUrl, `${provider} is missing signupUrl`);
+    assert.ok(info.freeTierNotes, `${provider} is missing freeTierNotes`);
+  }
 });

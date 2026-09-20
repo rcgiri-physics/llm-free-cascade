@@ -642,4 +642,15 @@ class LLMCascade {
   }
 }
 
-module.exports = { LLMCascade, LLMCascadeError, parseJsonLoose, redact, ALL_PROVIDERS, DEFAULT_MODELS };
+module.exports = {
+  LLMCascade,
+  LLMCascadeError,
+  parseJsonLoose,
+  redact,
+  ALL_PROVIDERS,
+  DEFAULT_MODELS,
+  // { [provider]: { envVar, signupUrl, freeTierNotes } } — every provider this
+  // package knows about, straight from providers.json, so a host app (or the
+  // `keys` CLI) can build a "get more free keys" UI without duplicating the data.
+  PROVIDER_INFO: PROVIDERS_META,
+};

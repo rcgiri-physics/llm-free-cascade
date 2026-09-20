@@ -66,3 +66,15 @@ export function parseJsonLoose(text: string): any;
 export function redact(message: string): string;
 export const ALL_PROVIDERS: Provider[];
 export const DEFAULT_MODELS: Record<Provider, string>;
+
+export interface ProviderInfo {
+  envVar: string;
+  apiStyle: string;
+  baseUrl: string | null;
+  defaultModel: string;
+  signupUrl: string;
+  freeTierNotes: string;
+  extraHeaders?: boolean;
+}
+
+export const PROVIDER_INFO: Record<Provider, ProviderInfo>;
