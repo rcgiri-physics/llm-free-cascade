@@ -7,8 +7,9 @@
  * the point is to stack several free accounts instead of paying for one.
  *
  * Supported providers: gemini, groq, cerebras, sambanova, mistral, openrouter,
- * together, deepseek, cohere, huggingface, cloudflare, anthropic (paid,
- * intended as a last-resort tier rather than a free one).
+ * together, deepseek, cohere, huggingface, cloudflare, zhipu, nvidia,
+ * opencode, anthropic (paid, intended as a last-resort tier rather than a
+ * free one).
  *
  * Zero dependencies — uses global fetch (Node 18+).
  */

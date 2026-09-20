@@ -2,9 +2,10 @@
 
 Call an LLM without paying for it. `llm-free-cascade` tries a chat completion
 across a chain of providers — Gemini, Groq, Cerebras, SambaNova, Mistral,
-OpenRouter, Together AI, DeepSeek, Cohere, Hugging Face, and Cloudflare
-Workers AI all have (or had) a usable free tier — and falls through to the
-next one whenever the current one is rate-limited, out of quota, or errors.
+OpenRouter, Together AI, DeepSeek, Cohere, Hugging Face, Cloudflare Workers
+AI, Z.ai (Zhipu), NVIDIA NIM, and OpenCode Zen all have (or had) a usable
+free tier — and falls through to the next one whenever the current one is
+rate-limited, out of quota, or errors.
 An optional paid provider (Anthropic) can sit at the end of the chain as a
 last resort.
 
@@ -240,6 +241,9 @@ any dispatch logic (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 | Cohere | `COHERE_API_KEY` | dashboard.cohere.com/api-keys |
 | Hugging Face | `HUGGINGFACE_API_KEY` | huggingface.co/settings/tokens |
 | Cloudflare Workers AI | `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | dash.cloudflare.com |
+| Z.ai (Zhipu) | `ZHIPU_API_KEY` | open.bigmodel.cn |
+| NVIDIA NIM | `NVIDIA_API_KEY` | build.nvidia.com |
+| OpenCode Zen | `OPENCODE_API_KEY` | opencode.ai/zen |
 | Anthropic (paid, last resort) | `ANTHROPIC_API_KEY` | console.anthropic.com |
 
 Free tiers, model names, and pricing change over time — this table (and

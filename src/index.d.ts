@@ -1,7 +1,7 @@
 export type Provider =
   | 'gemini' | 'groq' | 'cerebras' | 'sambanova' | 'mistral'
   | 'openrouter' | 'together' | 'deepseek' | 'cohere' | 'huggingface'
-  | 'cloudflare' | 'anthropic';
+  | 'cloudflare' | 'zhipu' | 'nvidia' | 'opencode' | 'anthropic';
 
 export interface LLMCascadeOptions {
   keys?: Partial<Record<Provider, string | string[]>>;

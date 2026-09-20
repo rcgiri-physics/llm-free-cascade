@@ -89,6 +89,30 @@
     "signupUrl": "https://dash.cloudflare.com",
     "freeTierNotes": "free inference credits (Workers AI); needs CLOUDFLARE_ACCOUNT_ID"
   },
+  "zhipu": {
+    "envVar": "ZHIPU_API_KEY",
+    "apiStyle": "openai-compat",
+    "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+    "defaultModel": "glm-4-flash",
+    "signupUrl": "https://open.bigmodel.cn",
+    "freeTierNotes": "glm-4-flash is free"
+  },
+  "nvidia": {
+    "envVar": "NVIDIA_API_KEY",
+    "apiStyle": "openai-compat",
+    "baseUrl": "https://integrate.api.nvidia.com/v1",
+    "defaultModel": "meta/llama-3.1-8b-instruct",
+    "signupUrl": "https://build.nvidia.com",
+    "freeTierNotes": "free API credits via NVIDIA NIM"
+  },
+  "opencode": {
+    "envVar": "OPENCODE_API_KEY",
+    "apiStyle": "openai-compat",
+    "baseUrl": "https://opencode.ai/zen/v1",
+    "defaultModel": "grok-code",
+    "signupUrl": "https://opencode.ai/zen",
+    "freeTierNotes": "free tier available"
+  },
   "anthropic": {
     "envVar": "ANTHROPIC_API_KEY",
     "apiStyle": "anthropic",
