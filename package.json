@@ -1,6 +1,6 @@
 {
   "name": "llm-free-cascade",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Cascade a chat completion across every free-tier LLM API you have a key for (Gemini, Groq, Cerebras, SambaNova, Mistral, OpenRouter, Together, DeepSeek, Cohere, Hugging Face, Cloudflare Workers AI) with automatic multi-key rotation, provider cooldown, and a paid last-resort fallback.",
   "main": "src/index.js",
   "types": "src/index.d.ts",

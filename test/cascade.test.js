@@ -12,12 +12,12 @@ test('throws when no provider is configured', async () => {
   );
 });
 
-test('order filters to only providers with a key', () => {
+test('order filters to only providers with a key', async () => {
   const cascade = new LLMCascade({
     keys: { groq: 'k1', gemini: 'k2' },
     order: ['gemini', 'groq', 'cerebras'],
   });
-  assert.deepEqual(cascade._liveOrder(), ['gemini', 'groq']);
+  assert.deepEqual(await cascade._liveOrder(), ['gemini', 'groq']);
 });
 
 test('parseJsonLoose extracts JSON wrapped in markdown fences', () => {
@@ -39,9 +39,9 @@ test('fromEnv reads comma-separated and numbered keys', () => {
   delete process.env.GEMINI_API_KEY_2;
 });
 
-test('getLiveOrder is a public wrapper around the live provider chain', () => {
+test('getLiveOrder is a public wrapper around the live provider chain', async () => {
   const cascade = new LLMCascade({ keys: { groq: 'k1' }, order: ['groq'] });
-  assert.deepEqual(cascade.getLiveOrder(), ['groq']);
+  assert.deepEqual(await cascade.getLiveOrder(), ['groq']);
 });
 
 test('modelResolver overrides the static model when it returns a value', () => {
@@ -86,4 +86,69 @@ test('onProviderFailure and onProviderCooldown fire with redacted messages', asy
   assert.equal(failures[0].provider, 'groq');
   assert.ok(!failures[0].message.includes('sk-secretvalue123'), 'secret should be redacted');
   assert.equal(cooldowns.length, 0); // HTTP 401 is key-exhausted, not a structural/provider-level failure
+});
+
+test('a slow provider times out and the cascade falls over to the next one', async (t) => {
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+  global.fetch = async (url, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    // never resolves on its own — only the abort should settle this promise
+  });
+
+  const cascade = new LLMCascade({
+    keys: { groq: 'k1', cerebras: 'k2' },
+    order: ['groq', 'cerebras'],
+    timeoutMs: 20,
+  });
+  await assert.rejects(
+    () => cascade.generate({ system: 's', user: 'u' }),
+    /timed out after 20ms/
+  );
+});
+
+test('usage is normalized and threaded through to the result', async (t) => {
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      choices: [{ message: { content: 'hi' } }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    }),
+  });
+
+  const cascade = new LLMCascade({ keys: { groq: 'k1' }, order: ['groq'] });
+  const result = await cascade.generate({ system: 's', user: 'u' });
+  assert.deepEqual(result.usage, { promptTokens: 10, completionTokens: 5, totalTokens: 15 });
+});
+
+test('usage is undefined when the provider does not report one', async (t) => {
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+  global.fetch = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: 'hi' } }] }) });
+
+  const cascade = new LLMCascade({ keys: { groq: 'k1' }, order: ['groq'] });
+  const result = await cascade.generate({ system: 's', user: 'u' });
+  assert.equal(result.usage, undefined);
+});
+
+test('a custom cooldownStore is used instead of the in-memory default', async (t) => {
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+  global.fetch = async () => ({ ok: false, status: 500, json: async () => ({ error: { message: 'HTTP 500: no content' } }) });
+
+  const store = new Map();
+  const cooldownStore = {
+    get: (p) => store.get(p) || 0,
+    set: (p, until) => { store.set(p, until); },
+  };
+  const cascade = new LLMCascade({
+    keys: { groq: 'k1', cerebras: 'k2' },
+    order: ['groq', 'cerebras'],
+    cooldownStore,
+  });
+
+  await assert.rejects(() => cascade.generate({ system: 's', user: 'u' }));
+  assert.ok(store.get('groq') > Date.now(), 'cooldown should be recorded in the custom store');
 });

@@ -128,6 +128,44 @@ via `cooldownMs`) so a busy loop doesn't hammer a broken provider on every
 call. Transient errors (a single bad request, one rate-limited call) don't
 trigger a cooldown — they just move on to the next provider for that call.
 
+Cooldown state lives in an in-memory `Map` by default, which is per-process.
+If you're running multiple instances/serverless invocations and want them to
+share cooldown state, pass a `cooldownStore` — anything with a `get(provider)`
+and `set(provider, until)` (sync or async, e.g. backed by Redis):
+
+```js
+const cascade = new LLMCascade({
+  keys: { ... },
+  cooldownStore: {
+    get: (provider) => redis.get(`cooldown:${provider}`),
+    set: (provider, until) => redis.set(`cooldown:${provider}`, until),
+  },
+});
+```
+
+## Timeouts
+
+Free-tier endpoints occasionally hang instead of erroring. Every attempt has
+a timeout (default 30s) after which it's treated as a normal per-provider
+failure — the cascade just moves to the next provider, same as a 429 or 500:
+
+```js
+const cascade = new LLMCascade({ keys: { ... }, timeoutMs: 8000 });
+// or per call:
+await cascade.generate({ system, user, timeoutMs: 8000 });
+```
+
+## Usage reporting
+
+`generate()` returns a `usage` field alongside `text`/`provider` whenever the
+winning provider reports token counts (most do; it's `undefined` when one
+doesn't):
+
+```js
+const { text, provider, usage } = await cascade.generate({ system, user });
+console.log(usage); // { promptTokens: 10, completionTokens: 5, totalTokens: 15 }
+```
+
 ## Live model overrides & observability hooks
 
 For callers that resolve a model dynamically (e.g. from a DB-backed admin

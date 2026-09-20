@@ -53,6 +53,26 @@ function isProviderLevelFailure(message = '') {
   return /MAX_TOKENS|no content|HTTP 4\d\d|unknown provider|no API key/i.test(message);
 }
 
+const DEFAULT_TIMEOUT_MS = 30 * 1000;
+
+/**
+ * fetch() with a hard timeout. The AbortController/timer are always torn
+ * down in `finally` — on success, on a provider error, and on the timeout
+ * itself — so nothing (listener, timer) is left attached past this call.
+ */
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`timed out after ${timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function extractErrorDetail(res) {
   try {
     const body = await res.json();
@@ -112,7 +132,18 @@ function parseJsonLoose(text) {
   return undefined;
 }
 
-async function callGemini({ system, user, json, maxTokens, apiKey, model }) {
+/** Normalizes a provider's usage block into {promptTokens, completionTokens, totalTokens}, or undefined if the provider didn't report one. */
+function normalizeUsage(u) {
+  if (!u) return undefined;
+  // Gemini's usageMetadata uses different field names than the OpenAI/Anthropic shape.
+  const prompt = u.promptTokenCount ?? u.prompt_tokens ?? u.input_tokens;
+  const completion = u.candidatesTokenCount ?? u.completion_tokens ?? u.output_tokens;
+  const total = u.totalTokenCount ?? u.total_tokens ?? (prompt != null && completion != null ? prompt + completion : undefined);
+  if (prompt == null && completion == null && total == null) return undefined;
+  return { promptTokens: prompt, completionTokens: completion, totalTokens: total };
+}
+
+async function callGemini({ system, user, json, maxTokens, apiKey, model, timeoutMs }) {
   const body = {
     system_instruction: { parts: [{ text: system }] },
     contents: [{ role: 'user', parts: [{ text: user }] }],
@@ -123,11 +154,11 @@ async function callGemini({ system, user, json, maxTokens, apiKey, model }) {
   const url = `${PROVIDERS_META.gemini.baseUrl}/${encodeURIComponent(model)}:generateContent`;
   let res;
   try {
-    res = await fetch(url, {
+    res = await fetchWithTimeout(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
       body: JSON.stringify(body),
-    });
+    }, timeoutMs);
   } catch (err) {
     throw new Error(`gemini network error: ${err.message}`);
   }
@@ -140,11 +171,11 @@ async function callGemini({ system, user, json, maxTokens, apiKey, model }) {
     const reason = candidate?.finishReason || data.promptFeedback?.blockReason;
     throw new Error(`gemini returned no content${reason ? ` (${reason})` : ''}`);
   }
-  return text;
+  return { text, usage: normalizeUsage(data.usageMetadata) };
 }
 
 /** Shared OpenAI-compatible caller (Groq, Cerebras, SambaNova, Mistral, OpenRouter, Together, DeepSeek, Cohere, HF, Cloudflare). */
-async function callOpenAICompat({ system, user, json, maxTokens, baseUrl, model, apiKey, provider, extraHeaders }) {
+async function callOpenAICompat({ system, user, json, maxTokens, baseUrl, model, apiKey, provider, extraHeaders, timeoutMs }) {
   const body = {
     model,
     messages: [
@@ -157,11 +188,11 @@ async function callOpenAICompat({ system, user, json, maxTokens, baseUrl, model,
 
   let res;
   try {
-    res = await fetch(`${baseUrl}/chat/completions`, {
+    res = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}`, ...extraHeaders },
       body: JSON.stringify(body),
-    });
+    }, timeoutMs);
   } catch (err) {
     throw new Error(`${provider} network error: ${err.message}`);
   }
@@ -170,20 +201,20 @@ async function callOpenAICompat({ system, user, json, maxTokens, baseUrl, model,
   const data = await res.json();
   const text = (data.choices?.[0]?.message?.content || '').trim();
   if (!text) throw new Error(`${provider} returned an empty response`);
-  return text;
+  return { text, usage: normalizeUsage(data.usage) };
 }
 
-async function callAnthropic({ system, user, json, schema, maxTokens, apiKey, model }) {
+async function callAnthropic({ system, user, json, schema, maxTokens, apiKey, model, timeoutMs }) {
   const body = { model, max_tokens: maxTokens || 1024, system, messages: [{ role: 'user', content: user }] };
   if (json && schema) body.output_config = { format: { type: 'json_schema', schema } };
 
   let res;
   try {
-    res = await fetch(PROVIDERS_META.anthropic.baseUrl, {
+    res = await fetchWithTimeout(PROVIDERS_META.anthropic.baseUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': ANTHROPIC_VERSION },
       body: JSON.stringify(body),
-    });
+    }, timeoutMs);
   } catch (err) {
     throw new Error(`anthropic network error: ${err.message}`);
   }
@@ -192,7 +223,7 @@ async function callAnthropic({ system, user, json, schema, maxTokens, apiKey, mo
   const data = await res.json();
   const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
   if (!text) throw new Error('anthropic returned an empty response');
-  return text;
+  return { text, usage: normalizeUsage(data.usage) };
 }
 
 /**
@@ -233,6 +264,8 @@ function callProviderWithKey(provider, opts, apiKey, model) {
  * @property {number} [cooldownMs=600000] - how long to skip a provider after a structural failure.
  * @property {string} [appName] - sent as OpenRouter's X-Title header.
  * @property {string} [referer] - sent as OpenRouter's HTTP-Referer header.
+ * @property {number} [timeoutMs=30000] - default per-attempt fetch timeout; overridable per-call via `generate({ timeoutMs })`. A timeout is treated as a normal provider failure (cascade moves to the next provider).
+ * @property {{get: (provider: string) => (number|Promise<number>), set: (provider: string, until: number) => (void|Promise<void>)}} [cooldownStore] - where cooldown timestamps live. Defaults to an in-memory Map (per-instance only); pass a shared store (e.g. Redis-backed) to coordinate cooldowns across processes/instances.
  * @property {(provider: string) => (string|null|undefined)} [modelResolver] - called before every attempt to resolve a live model override (e.g. from a DB/admin panel); falls back to `models[provider]` when it returns null/undefined or throws.
  * @property {(provider: string, message: string) => void} [onProviderFailure] - called once per failed provider, before the cooldown decision.
  * @property {(provider: string, cooldownMs: number) => void} [onProviderCooldown] - called when a provider is put on cooldown.
@@ -248,7 +281,14 @@ class LLMCascade {
     this.modelResolver = options.modelResolver;
     this.onProviderFailure = options.onProviderFailure;
     this.onProviderCooldown = options.onProviderCooldown;
-    this.cooldownUntil = new Map();
+    this.timeoutMs = options.timeoutMs;
+    // In-memory default; a caller can pass `cooldownStore` (e.g. backed by
+    // Redis) to share cooldown state across processes/instances instead.
+    const cooldownUntil = new Map();
+    this.cooldownStore = options.cooldownStore || {
+      get: (provider) => cooldownUntil.get(provider) || 0,
+      set: (provider, until) => { cooldownUntil.set(provider, until); },
+    };
 
     const rawKeys = options.keys || {};
     this.keys = {};
@@ -291,9 +331,10 @@ class LLMCascade {
     });
   }
 
-  _liveOrder() {
+  async _liveOrder() {
     const now = Date.now();
-    const live = this.order.filter((p) => (this.cooldownUntil.get(p) || 0) <= now);
+    const untils = await Promise.all(this.order.map((p) => this.cooldownStore.get(p)));
+    const live = this.order.filter((p, i) => (untils[i] || 0) <= now);
     return live.length ? live : this.order; // never starve to zero
   }
 
@@ -302,10 +343,10 @@ class LLMCascade {
     return this._liveOrder();
   }
 
-  _coolDown(provider) {
-    const stillLive = this._liveOrder().filter((p) => p !== provider);
+  async _coolDown(provider) {
+    const stillLive = (await this._liveOrder()).filter((p) => p !== provider);
     if (!stillLive.length) return; // it's all we have — keep trying it
-    this.cooldownUntil.set(provider, Date.now() + this.cooldownMs);
+    await this.cooldownStore.set(provider, Date.now() + this.cooldownMs);
     if (typeof this.onProviderCooldown === 'function') {
       try { this.onProviderCooldown(provider, this.cooldownMs); } catch { /* observability hook — never break the cascade */ }
     }
@@ -347,10 +388,11 @@ class LLMCascade {
    * @param {boolean} [params.json] - request a JSON response (provider-native JSON mode where available)
    * @param {number} [params.maxTokens]
    * @param {(text: string) => any} [params.parse] - if given, a provider whose output fails this is treated as a failure and the cascade moves on
-   * @returns {Promise<{text: string, parsed: any, provider: string}>}
+   * @param {number} [params.timeoutMs] - per-attempt fetch timeout override for this call
+   * @returns {Promise<{text: string, parsed: any, provider: string, usage: ({promptTokens: number, completionTokens: number, totalTokens: number}|undefined)}>}
    */
   async generate(params) {
-    const chain = this._liveOrder();
+    const chain = await this._liveOrder();
     if (!chain.length) {
       throw new LLMCascadeError(
         `No provider is configured. Pass at least one key in "keys", or set an env var: ${Object.values(PROVIDER_ENV).join(', ')}.`,
@@ -358,20 +400,26 @@ class LLMCascade {
       );
     }
 
-    const opts = { ...params, appName: this.appName, referer: this.referer, cloudflareAccountId: this.cloudflareAccountId };
+    const opts = {
+      ...params,
+      appName: this.appName,
+      referer: this.referer,
+      cloudflareAccountId: this.cloudflareAccountId,
+      timeoutMs: params.timeoutMs ?? this.timeoutMs,
+    };
     const failures = [];
     for (const provider of chain) {
       try {
-        const text = await this._callProvider(provider, opts);
+        const { text, usage } = await this._callProvider(provider, opts);
         const parsed = typeof opts.parse === 'function' ? opts.parse(text) : undefined;
-        return { text, parsed, provider };
+        return { text, parsed, provider, usage };
       } catch (err) {
         const message = redact(err.message);
         failures.push({ provider, message });
         if (typeof this.onProviderFailure === 'function') {
           try { this.onProviderFailure(provider, message); } catch { /* observability hook — never break the cascade */ }
         }
-        if (isProviderLevelFailure(err.message)) this._coolDown(provider);
+        if (isProviderLevelFailure(err.message)) await this._coolDown(provider);
       }
     }
 
