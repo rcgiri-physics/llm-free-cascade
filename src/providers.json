@@ -3,7 +3,7 @@
     "envVar": "GEMINI_API_KEY",
     "apiStyle": "gemini",
     "baseUrl": "https://generativelanguage.googleapis.com/v1beta/models",
-    "defaultModel": "gemini-2.5-flash",
+    "defaultModel": "gemini-3.6-flash",
     "signupUrl": "https://aistudio.google.com",
     "freeTierNotes": "~1500 requests/day",
     "costPerMillionTokens": 0.5
@@ -20,9 +20,9 @@
     "envVar": "CEREBRAS_API_KEY",
     "apiStyle": "openai-compat",
     "baseUrl": "https://api.cerebras.ai/v1",
-    "defaultModel": "llama-4-scout",
+    "defaultModel": "gpt-oss-120b",
     "signupUrl": "https://inference.cerebras.ai",
-    "freeTierNotes": "free, fast Llama inference"
+    "freeTierNotes": "free, very fast inference; the free lineup is small and rotates"
   },
   "sambanova": {
     "envVar": "SAMBANOVA_API_KEY",
@@ -45,9 +45,9 @@
     "envVar": "OPENROUTER_API_KEY",
     "apiStyle": "openai-compat",
     "baseUrl": "https://openrouter.ai/api/v1",
-    "defaultModel": "google/gemini-2.5-flash:free",
+    "defaultModel": "nvidia/nemotron-3-super-120b-a12b:free",
     "signupUrl": "https://openrouter.ai",
-    "freeTierNotes": "look for model slugs ending in :free",
+    "freeTierNotes": "look for model slugs ending in :free; which ones a key can actually reach changes often, and the rest return 429",
     "extraHeaders": true
   },
   "together": {

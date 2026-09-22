@@ -161,13 +161,13 @@ hex string and anything else is rejected before a request is made.
 
 ## Gemini: disabling "thinking"
 
-`gemini-2.5-flash` thinks by default, spending part of its output budget on
+Gemini's flash models think by default, spending part of the output budget on
 reasoning before it writes anything else — which can starve a short,
 deterministic call (classification, tagging, a yes/no) into `MAX_TOKENS`
 before it ever produces the answer. Pass `noThinking: true` to zero out its
 thinking budget for calls that don't benefit from it. Every other provider
 ignores the flag. Only set it for models that allow thinking to be disabled
-(`gemini-2.5-flash`, `-flash-lite`) — `gemini-2.5-pro` rejects a zero
+(the `flash` and `flash-lite` lines) — the `pro` models reject a zero
 budget with a 400, which counts as a provider failure:
 
 ```js
