@@ -1,13 +1,18 @@
 # llm-free-cascade
 
 Call an LLM without paying for it. `llm-free-cascade` tries a chat completion
-across a chain of providers — Gemini, Groq, Cerebras, SambaNova, Mistral,
-OpenRouter, Together AI, DeepSeek, Cohere, Hugging Face, Cloudflare Workers
-AI, Z.ai (Zhipu), NVIDIA NIM, OpenCode Zen, and Pollinations all have (or
-had) a usable free tier — and falls through to the next one whenever the
-current one is rate-limited, out of quota, or errors.
-An optional paid provider (Anthropic) can sit at the end of the chain as a
-last resort.
+across a chain of providers — Groq, Gemini, Cerebras, Mistral, NVIDIA NIM,
+Z.ai (Zhipu), OpenRouter, SiliconFlow, ModelScope, Cloudflare Workers AI,
+Hugging Face, Cohere, SambaNova, Pollinations, OpenCode Zen, OVHcloud and LLM7
+all have (or had) a usable free tier — and falls through to the next one
+whenever the current one is rate-limited, out of quota, or errors. It
+understands *why* something failed: a rate-limited key rests for exactly as
+long as the provider says, and a limit that is per model falls to the next
+model on the same key before leaving the provider.
+Any other OpenAI-compatible endpoint (a self-hosted gateway such as
+OmniRoute or LiteLLM, say) can join the chain as a
+[custom provider](#custom-providers-and-gateways). Paid providers (DeepSeek,
+Anthropic) can sit at the end as a last resort.
 
 Zero dependencies. Node 18+ (uses global `fetch`).
 
@@ -93,6 +98,11 @@ GEMINI_API_KEY_2=key2
 GEMINI_API_KEY_3=key3
 ```
 
+Keys are used round-robin, so successive calls start on different keys and a
+burst is spread across them. A key that was just rate-limited (or rejected as
+invalid) rests on its own cooldown and is skipped without spending a request,
+instead of being retried first on every call.
+
 ## JSON output + parse-and-retry
 
 Pass `json: true` to request each provider's native JSON mode, and a `parse`
@@ -134,16 +144,32 @@ if the override ends up empty:
 await cascade.generate({ system, user, order: ['cerebras', 'groq'] }); // just this call
 ```
 
-## Overriding models
+## Overriding models, and model fallbacks
 
 Free-tier model line-ups change without notice. Override per provider:
 
 ```js
 const cascade = new LLMCascade({
   keys: { ... },
-  models: { groq: 'llama-3.3-70b-versatile' },
+  models: { groq: 'llama-3.3-70b-versatile' }, // a string pins exactly this model
 });
 ```
+
+Most free tiers count limits **per model**, so one account has several
+buckets. Groq, for instance, gives each of `gpt-oss-120b`, `gpt-oss-20b` and
+`qwen3.8-27b` its own 1,000 requests/day. By default each provider tries its
+`defaultModel` and then its `fallbackModels` from
+[`providers.json`](src/providers.json); a 429 on one falls to the next on the
+same key before the cascade leaves the provider. Pass an array to choose the
+list yourself:
+
+```js
+models: { groq: ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b'] }
+```
+
+A string (or a `modelResolver` result) is always used alone, with no fallbacks.
+A model that has been retired (404) is dropped for every key, not retried once
+per key per call.
 
 ## Cloudflare Workers AI
 
@@ -203,17 +229,34 @@ HTTP 4xx once every key for it has been tried) it's put on a cooldown
 hammer a broken provider on every call. The last provider still standing is
 never cooled down — there'd be nothing left to try.
 
-Rate-limit/quota failures (429) get their own knob, `rateLimitCooldownMs`,
-which defaults to `cooldownMs`. Set it lower when your providers' limits are
-per-minute rather than per-day:
+Rate-limit/quota failures (429) are **reset-aware**. The key+model that was
+limited rests for as long as the provider says: its `Retry-After` header, or a
+"try again in 2m59s" hint in the error text. With no hint, a message that
+names a per-minute limit rests for a minute, and one that names a per-day
+limit rests until the provider's daily reset (Gemini: midnight Pacific; where
+there's no clock reset it is re-checked hourly). Only when every key and
+model of a provider is spent does the provider itself leave the chain, until
+the earliest of them recovers. That's what lets the chain wrap back around to
+your fastest provider within a minute instead of ten.
+
+To override all of that with one fixed number, set `rateLimitCooldownMs`:
 
 ```js
 const cascade = new LLMCascade({
   keys: { ... },
-  cooldownMs: 10 * 60 * 1000,     // structural failures
-  rateLimitCooldownMs: 60 * 1000, // 429s: try again after a minute
+  cooldownMs: 10 * 60 * 1000,     // structural failures (bad key, retired model, no content)
+  rateLimitCooldownMs: 60 * 1000, // pin every 429 to a minute (turns the reset-aware logic off)
 });
 ```
+
+Other failures are told apart too:
+
+- A prompt that is **too long** for one provider's context window (HTTP 400/413)
+  skips that provider for this call only. It no longer benches it for everyone.
+- **Timeouts, dropped connections and 5xx** trip a circuit breaker after two in
+  a row (`breakerMs`, default 60 s; `0` disables), so a dead provider costs one
+  timeout, not one per call.
+- A **401/403** takes only that key out of rotation.
 
 > **Cost note.** If you put a paid provider (e.g. `anthropic`) at the end of
 > the chain, remember that a cooldown on every free provider routes *all*
@@ -229,9 +272,11 @@ waiting out the rest of `cooldownMs`/`rateLimitCooldownMs`:
 await cascade.clearCooldown('groq');
 ```
 
-Cooldown state lives in an in-memory `Map` by default, which is per-process.
-If you're running multiple instances/serverless invocations and want them to
-share cooldown state, pass a `cooldownStore` — anything with a `get(provider)`
+Provider-level cooldown state lives in an in-memory `Map` by default, which is
+per-process. (Per-key and per-model rests are always in-process: a key's
+position in the list only means something inside the instance that holds the
+list.) If you're running multiple instances/serverless invocations and want
+them to share provider cooldown state, pass a `cooldownStore` — anything with a `get(provider)`
 and `set(provider, until)` (sync or async, e.g. backed by Redis). An optional
 `getMany(providers)` lets a remote store answer for the whole chain in one
 round-trip instead of one `get` per provider:
@@ -265,6 +310,13 @@ For streams it's the time-to-first-byte, and then an **idle** timeout that's
 re-armed after every chunk: a long generation that keeps producing tokens is
 never cut off, but one that goes quiet mid-way fails with a `timed out`
 error. Non-positive or non-numeric values fall back to the default.
+
+A fast provider can be given a shorter leash than a slow one with
+`providerTimeoutMs` (a `timeoutMs` passed to `generate()` still wins):
+
+```js
+const cascade = new LLMCascade({ keys: { ... }, providerTimeoutMs: { groq: 10_000, cerebras: 10_000 } });
+```
 
 Per-attempt timeouts still let a bad day add up (15 providers × 30s). To
 bound the *whole* call, set `deadlineMs`. Each attempt gets the smaller of
@@ -385,38 +437,144 @@ const cascade = new LLMCascade({
 `cascade.getLiveOrder()` returns the current provider chain with anything on
 cooldown filtered out — useful for a status page or admin UI.
 
+## Watching what the cascade does
+
+Everything below is in-process: a second process has its own numbers. Key
+material is never included, keys show up as `#0`, `#1`, … by position.
+
+**`cascade.stats()`** is a snapshot since the instance was created. Per
+provider it has calls / successes / 429s / timeouts, latency (EWMA, p50, p95),
+tokens, the last error, per-model and per-key counters, the provider's
+remaining cooldown, and `usableInMs` (0 means usable now):
+
+```js
+const { providers } = await cascade.stats();
+console.table(Object.entries(providers).map(([name, p]) => ({
+  provider: name, calls: p.calls, ok: p.ok, '429s': p.rateLimited,
+  p50: p.latencyMs.p50, usableInMs: p.usableInMs,
+})));
+```
+
+**`onAttempt`** fires after every single HTTP attempt (every key × model
+tried), which is the right hook for a log line or a metrics counter:
+
+```js
+const cascade = new LLMCascade({
+  keys: { ... },
+  onAttempt: ({ provider, model, keyIndex, ok, ms, kind, error }) =>
+    logger.info('llm attempt', { provider, model, keyIndex, ok, ms, kind, error }),
+});
+```
+
+**`cascade.probe()`** sends one tiny request through every configured key (one
+at a time) and tells you who answered. Run it at deploy time, or on a
+schedule, to catch a revoked key or a retired default model before a user
+does. It spends a little real quota per key and never changes cooldowns.
+
+**CLI** (reads the same environment variables as `fromEnv()`):
+
+```bash
+npx llm-free-cascade status                 # order, keys, models, free-tier limits, warnings
+npx llm-free-cascade probe                  # live check of every key
+npx llm-free-cascade probe --watch 300      # ...repeated every 5 minutes (spends quota each round)
+npx llm-free-cascade probe --provider groq  # only some providers; add --json for machine output
+```
+
+**Order by speed** (opt-in): `adaptiveOrder: true` reorders providers *within the
+same tier* by observed latency and success rate, once there are enough
+samples. Tiers are in `providers.json`, so a paid provider never jumps ahead
+of a free one.
+
+From a checkout, `npm run check:providers` asks each provider's model-list
+endpoint (no tokens, no quota) whether the default and fallback models still
+exist. OpenRouter, ModelScope, OVHcloud, LLM7 and Pollinations list models
+without a key; for the others it uses the key from your environment.
+
+## Custom providers and gateways
+
+Any OpenAI-compatible endpoint can join the chain without a code change: a
+self-hosted gateway such as [OmniRoute](https://github.com/diegosouzapw/OmniRoute)
+or LiteLLM, a community router, or a provider that isn't in `providers.json` yet.
+
+```js
+const cascade = new LLMCascade({
+  keys: { groq: process.env.GROQ_API_KEY },
+  custom: {
+    omniroute: {
+      baseUrl: 'http://localhost:20128/v1', // requests go to <baseUrl>/chat/completions
+      models: ['auto/best-free'],
+      apiKey: process.env.OMNIROUTE_KEY,
+      tier: 4,                               // where it sits in the default order (1 first … 5 last)
+    },
+  },
+});
+```
+
+Or from the environment: `LLM_CUSTOM_PROVIDERS='{"omniroute":{"baseUrl":"…","model":"…","apiKey":"…"}}'`.
+A custom provider takes part in everything else (key rotation, model
+fallback, cooldowns, `order`, `stats()`). `baseUrl` must be `https://` (plain
+`http://` is accepted only for localhost), and a custom provider cannot reuse
+a built-in name or set `Authorization`/`Host` headers.
+
+To point a *built-in* provider elsewhere — your own proxy, or the China
+endpoint for Zhipu (a key from `open.bigmodel.cn` does not work on the
+international `api.z.ai`) — use `baseUrls` or `<PROVIDER>_BASE_URL`:
+
+```js
+new LLMCascade({ keys: { zhipu: key }, baseUrls: { zhipu: 'https://open.bigmodel.cn/api/paas/v4' } });
+```
+
+> **A gateway is not a free lunch.** OmniRoute and similar tools hold *every*
+> key you give them, so put a password on them (OmniRoute's default dashboard
+> password is the literal `CHANGEME`) and don't expose the port. Some of their
+> "free" sources are reused consumer-subscription logins or unofficial pools:
+> check those providers' terms before relying on them. This package already
+> does key rotation, fallback and cooldowns, so a gateway in front of it mostly
+> adds a second layer that argues with the first. It is most useful as one late
+> tier, or for discovering which obscure free providers currently work.
+
 ## Supported providers
 
 [`src/providers.json`](src/providers.json) is the single source of truth for
-every provider this package knows about — base URL, default model, the env
-var it reads, and where to sign up for the free tier. It's a plain JSON file
-specifically so that fixing a retired model name, or adding a brand-new
-free-tier provider, is a one-file pull request that doesn't require touching
-any dispatch logic (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+every provider this package knows about — base URL, default and fallback
+models, tier, free-tier limits, the env var it reads, and where to sign up. It's
+a plain JSON file specifically so that fixing a retired model name, or adding
+a brand-new free-tier provider, is a one-file pull request that doesn't
+require touching any dispatch logic (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+The default order is the file's order, sorted by **tier** (1 = fast and roomy,
+5 = paid last resort).
 
-| Provider | Env var | Free tier |
-|---|---|---|
-| Google Gemini | `GEMINI_API_KEY` | aistudio.google.com |
-| Groq | `GROQ_API_KEY` | console.groq.com |
-| Cerebras | `CEREBRAS_API_KEY` | inference.cerebras.ai |
-| SambaNova | `SAMBANOVA_API_KEY` | cloud.sambanova.ai |
-| Mistral | `MISTRAL_API_KEY` | console.mistral.ai |
-| OpenRouter | `OPENROUTER_API_KEY` | openrouter.ai (has `:free` model slugs) |
-| Together AI | `TOGETHER_API_KEY` | api.together.xyz (signup credit) |
-| DeepSeek | `DEEPSEEK_API_KEY` | platform.deepseek.com |
-| Cohere | `COHERE_API_KEY` | dashboard.cohere.com/api-keys |
-| Hugging Face | `HUGGINGFACE_API_KEY` | huggingface.co/settings/tokens |
-| Cloudflare Workers AI | `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | dash.cloudflare.com |
-| Z.ai (Zhipu) | `ZHIPU_API_KEY` | open.bigmodel.cn |
-| NVIDIA NIM | `NVIDIA_API_KEY` | build.nvidia.com |
-| OpenCode Zen | `OPENCODE_API_KEY` | opencode.ai/zen |
-| Pollinations | `POLLINATIONS_API_KEY` | auth.pollinations.ai (the API accepts anonymous calls at 1 req/15s, but the cascade only includes a provider it has a key for) |
-| Anthropic (paid, last resort) | `ANTHROPIC_API_KEY` | console.anthropic.com |
+| Tier | Provider | Env var | Free tier (see `providers.json` for sources) |
+|---|---|---|---|
+| 1 | Groq | `GROQ_API_KEY` | console.groq.com. Per model: 30 RPM, 1K req/day, 200K tokens/day, per organization |
+| 1 | Google Gemini | `GEMINI_API_KEY` | aistudio.google.com. Per project and per model, daily reset at midnight Pacific; free prompts may train Google's models |
+| 1 | Cerebras | `CEREBRAS_API_KEY` | inference.cerebras.ai. Now a **$5 trial that expires in 30 days** |
+| 2 | Mistral | `MISTRAL_API_KEY` | console.mistral.ai. ~1 req/s, big monthly pool; phone + data-training opt-in |
+| 2 | NVIDIA NIM | `NVIDIA_API_KEY` | build.nvidia.com. ~40 RPM, prototyping only |
+| 2 | Z.ai (Zhipu) | `ZHIPU_API_KEY` | z.ai. GLM-4.7-Flash / 4.5-Flash free, no expiry |
+| 3 | OpenRouter | `OPENROUTER_API_KEY` | openrouter.ai. `:free` models: 20 RPM, **50 req/day** (1,000 after a $10 top-up), enforced globally: extra accounts don't help |
+| 3 | SiliconFlow | `SILICONFLOW_API_KEY` | siliconflow.com. A few small models free; China-hosted |
+| 3 | ModelScope | `MODELSCOPE_API_KEY` | modelscope.cn. ~2,000 req/day; China-hosted, may need a phone |
+| 3 | Cloudflare Workers AI | `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | dash.cloudflare.com. 10K neurons/day, small context |
+| 3 | Hugging Face | `HUGGINGFACE_API_KEY` | huggingface.co/settings/tokens. Only ~$0.10/month now |
+| 3 | Cohere | `COHERE_API_KEY` | dashboard.cohere.com/api-keys. **Non-commercial only** |
+| 4 | Together AI | `TOGETHER_API_KEY` | api.together.xyz. Signup credit only |
+| 4 | SambaNova | `SAMBANOVA_API_KEY` | cloud.sambanova.ai. Trial; payment method now required |
+| 4 | Pollinations | `POLLINATIONS_API_KEY` | auth.pollinations.ai. Anonymous at 1 req/15s, but the cascade only includes a provider it has a key for |
+| 4 | OpenCode Zen | `OPENCODE_API_KEY` | opencode.ai/zen |
+| 4 | OVHcloud AI Endpoints | `OVH_AI_ENDPOINTS_API_KEY` | endpoints.ai.cloud.ovh.net. EU-hosted, ~12 RPM |
+| 4 | LLM7 | `LLM7_API_KEY` | token.llm7.io. Free tier **unverified** (its model list shows prices) |
+| 5 | DeepSeek (paid) | `DEEPSEEK_API_KEY` | platform.deepseek.com. Cheapest sensible paid fallback |
+| 5 | Anthropic (paid) | `ANTHROPIC_API_KEY` | console.anthropic.com |
 
 Free tiers, model names, and pricing change over time — this table (and
-`providers.json`) reflect the state at time of writing, not a live feed.
-Override `models`/`order` at runtime, or send a PR updating `providers.json`,
-as providers change their line-up.
+`providers.json`) reflect the state on 2026-10-07 (each entry's `verifiedAt`),
+not a live feed. Several providers cut or ended their free tiers in 2026
+(Cerebras, SambaNova, GitHub Models, Chutes). Where `limitsSource` is
+`tracker` or `unverified`, the numbers came from a third-party list, not the
+provider's own docs: read your own console before relying on them. Override
+`models`/`order` at runtime, or send a PR updating `providers.json`, as
+providers change their line-up.
 
 ## Get more free keys
 
@@ -428,8 +586,9 @@ npx llm-free-cascade keys
 ```
 
 Prints a ✓/✗ table against your current environment, and for anything
-missing, the signup URL and a one-line note on the free tier. Two optional
-flags:
+missing, the signup URL, a one-line note on the free tier, and flags that
+matter before you sign up (needs a phone or card, trial only, non-commercial,
+may train on your prompts, China-hosted). Two optional flags:
 
 ```bash
 npx llm-free-cascade keys --open   # opens every missing provider's signup page in your browser
@@ -444,12 +603,23 @@ no code changes.
 
 ### Scaling past one free-tier account
 
-Free tiers are almost always rate-limited **per account**, not per app. If
-you hit a wall, the built-in fix isn't a new provider — it's another account
-on the same one: sign up again with a different email, grab a second key, and
-add it to the same provider's key list (see "Multiple free keys per provider"
-above). The cascade rotates through them automatically before giving up on
-that provider.
+Most free tiers are rate-limited **per account** (Gemini: per project, Groq:
+per organization), so a second key can double your headroom. In order of
+preference:
+
+1. **Use every model bucket first.** Limits are usually per model (see
+   "model fallbacks"), so the default `fallbackModels` already multiply one
+   account's capacity at no risk.
+2. **Add more providers.** Each is an independent allowance.
+3. **Then add a second account** where it helps: another Gemini *project*, a
+   second Groq organization. Add the key to the same provider's list and the
+   cascade rotates through them.
+
+Know the limits of this: OpenRouter enforces its limit globally per user and
+says extra accounts or keys don't raise it; Mistral and NVIDIA need a phone
+number per account; and many providers' terms forbid opening several free
+accounts to get around a limit, usually punished by banning all of them. This
+package does not check that for you: read each provider's terms first.
 
 ## License
 

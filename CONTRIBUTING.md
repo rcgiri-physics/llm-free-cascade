@@ -13,16 +13,32 @@ free-tier model. This is a **one-file change**:
 2. Edit that provider's `defaultModel` in [`src/providers.json`](src/providers.json). Nothing else needs to change.
 3. Update the table in [`README.md`](README.md) if the free-tier terms changed too.
 
+Run `npm run check:providers` to see which default/fallback models the
+provider's own model list no longer has (it needs the provider's key in your
+environment, except for the few that list models publicly).
+
 ## Adding a new free-tier provider
 
 1. If it's OpenAI-compatible (`chat/completions` shape — most are), add an
    entry to [`src/providers.json`](src/providers.json) with `"apiStyle": "openai-compat"`,
-   its `baseUrl`, `defaultModel`, `envVar`, and a `signupUrl`. That's it — no
-   code changes, `callProviderWithKey` in [`src/index.js`](src/index.js) dispatches
-   on `apiStyle` automatically.
-2. Only add a bespoke caller (like `callGemini`/`callAnthropic`) if the
+   its `baseUrl`, `defaultModel`, `fallbackModels` (other models on the same
+   key, ideally with their own rate-limit bucket; `[]` if unknown), `tier`
+   (1 fast and roomy … 5 paid; **keep the file sorted by tier**, the default
+   order is the file order), `envVar`, a `signupUrl`, and `freeTierNotes`. That's
+   it — no code changes, `callProviderWithKey` in [`src/index.js`](src/index.js)
+   dispatches on `apiStyle` automatically.
+2. Record what you know about the limits, honestly: `limits` (`rpm`, `rpd`,
+   `tpm`, `tpd`, `perModel`, `scope`), `limitsSource` (`official` only if you read
+   the provider's own docs, otherwise `tracker` or `unverified`), `verifiedAt`,
+   and the flags that matter to a user before signing up: `trial`,
+   `requiresPhone`, `requiresCard`, `commercialOk: false`, `trainsOnData`,
+   `region`. If a daily limit resets at a clock time, add `dayReset`
+   (`"midnight:America/Los_Angeles"`).
+3. Don't add a provider whose free tier you couldn't confirm exists. Prefer
+   `limitsSource: "unverified"` plus an honest note over a confident guess.
+4. Only add a bespoke caller (like `callGemini`/`callAnthropic`) if the
    provider's request/response shape genuinely isn't OpenAI-compatible.
-3. Update the table in [`README.md`](README.md).
+5. Update the table in [`README.md`](README.md).
 
 ## Running tests
 
@@ -43,7 +59,15 @@ A few things the tests guard that are easy to regress:
   DoS (it was 150 s on 200 KB before the fix).
 - **Timeouts cover the body, not just the headers**, and for streams they're
   per-chunk (idle), not per-stream.
-- **The last live provider is never put on cooldown.**
+- **The last live provider is never put on cooldown**, and when every key+model
+  of a provider is resting, the one that recovers soonest is still tried.
+- **Key material never leaves the instance.** `stats()`, `onAttempt` and
+  `probe()` report keys by index only, and their error text is redacted.
+- **A request-specific failure (prompt too long) must not cool a provider**:
+  it would bench it for every other caller.
+- **Anything that makes a request to a user-supplied URL** (`custom`,
+  `baseUrls`) goes through `validateBaseUrl`: https only, http only for localhost.
+- **`providers.json` stays sorted by `tier`.** It is the default order.
 - **`signupUrl`s in `providers.json`** must be plain `https://host/path` — the
   CLI hands them to the OS shell to open a browser and refuses anything with a
   query string or shell metacharacters.

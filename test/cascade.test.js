@@ -469,6 +469,7 @@ test('rateLimitCooldownMs is used for 429s, cooldownMs for structural failures',
   const cascade = new LLMCascade({
     keys: { groq: 'k1', cerebras: 'k2', gemini: 'k3' },
     order: ['groq', 'cerebras', 'gemini'],
+    models: { groq: 'm1', cerebras: 'm2', gemini: 'm3' }, // pinned: no fallback models, so each provider is one attempt
     cooldownMs: 5000,
     rateLimitCooldownMs: 100,
     onProviderCooldown: (p, ms) => cooled.push([p, ms]),

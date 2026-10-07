@@ -1,16 +1,103 @@
-export type Provider =
-  | 'gemini' | 'groq' | 'cerebras' | 'sambanova' | 'mistral'
-  | 'openrouter' | 'together' | 'deepseek' | 'cohere' | 'huggingface'
-  | 'cloudflare' | 'zhipu' | 'nvidia' | 'opencode' | 'pollinations' | 'anthropic';
+export type BuiltinProvider =
+  | 'groq' | 'gemini' | 'cerebras' | 'mistral' | 'nvidia' | 'zhipu'
+  | 'openrouter' | 'siliconflow' | 'modelscope' | 'cloudflare' | 'huggingface' | 'cohere'
+  | 'together' | 'sambanova' | 'pollinations' | 'opencode' | 'ovh' | 'llm7'
+  | 'deepseek' | 'anthropic';
+
+/** A built-in provider, or the name of a `custom` provider you registered. */
+export type Provider = BuiltinProvider | (string & {});
+
+export interface CustomProvider {
+  /** https://... (or http://localhost... for a self-hosted gateway). Requests go to `<baseUrl>/chat/completions`. */
+  baseUrl: string;
+  /** Model to use. Give `models` instead for an ordered fallback list. */
+  model?: string;
+  models?: string[];
+  apiKey?: string;
+  apiKeys?: string[];
+  /** 1 (fast and roomy) to 5 (paid last resort). Places it in the default order. Default 3. */
+  tier?: number;
+  /** Extra request headers (Authorization / Content-Type / Host are not allowed). */
+  headers?: Record<string, string>;
+  /** When a daily limit resets, e.g. `"midnight:America/Los_Angeles"`. Default: re-check hourly. */
+  dayReset?: string;
+}
+
+export interface AttemptInfo {
+  provider: Provider;
+  model: string;
+  /** Position in the provider's key list. The key itself is never exposed. */
+  keyIndex: number;
+  ok: boolean;
+  ms: number;
+  /** On failure: what kind of failure it was. */
+  kind?: 'rate' | 'auth' | 'model' | 'request' | 'fatal';
+  /** Redacted. */
+  error?: string;
+  at: number;
+}
+
+export interface UsageCounters { calls: number; ok: number; rateLimited: number; }
+
+export interface ProviderStats {
+  tier: number;
+  keyCount: number;
+  calls: number;
+  ok: number;
+  failures: number;
+  rateLimited: number;
+  timeouts: number;
+  latencyMs: { ewma: number | null; p50: number | null; p95: number | null };
+  tokens: { prompt: number; completion: number; total: number };
+  lastError: string | null;
+  lastErrorAt: number | null;
+  lastSuccessAt: number | null;
+  /** Remaining provider-level cooldown (0 when live). */
+  providerCooldownMs: number;
+  /** How long until some key+model of this provider is usable and the provider is out of cooldown (0 = usable now). */
+  usableInMs: number;
+  keys: (UsageCounters & { index: number; cooldownMs: number })[];
+  models: Record<string, UsageCounters & { cooldownMs: number }>;
+}
+
+export interface CascadeStats {
+  since: number;
+  uptimeMs: number;
+  providers: Record<string, ProviderStats>;
+}
+
+export interface ProbeResult {
+  provider: Provider;
+  keyIndex: number;
+  model: string;
+  ok: boolean;
+  ms: number;
+  status: number | null;
+  /** Redacted. */
+  message: string | null;
+}
 
 export interface LLMCascadeOptions {
   keys?: Partial<Record<Provider, string | string[]>>;
+  /** Provider order. Default: every provider with a key, in tier order (see providers.json). */
   order?: Provider[];
-  models?: Partial<Record<Provider, string>>;
+  /** A string pins exactly that model; an array is an ordered list tried in turn (a 429 on the first falls to the second on the same key). Without an entry, providers.json's `defaultModel` then `fallbackModels` are used. */
+  models?: Partial<Record<Provider, string | string[]>>;
+  /** Extra OpenAI-compatible providers: a self-hosted gateway (OmniRoute, LiteLLM), a community router, anything not in providers.json. */
+  custom?: Record<string, CustomProvider>;
+  /** Re-point a built-in provider at another base URL (e.g. the China Zhipu endpoint, or your own proxy). */
+  baseUrls?: Partial<Record<BuiltinProvider, string>>;
   cloudflareAccountId?: string;
+  /** How long a provider sits out after a structural failure (bad key, retired model, no content). */
   cooldownMs?: number;
-  /** Cooldown after a rate-limit/quota (429) failure on a provider's last key. Defaults to `cooldownMs`. */
+  /** Pins the cooldown after a rate-limit/quota (429). When NOT set it is reset-aware: Retry-After, else a hint in the error text, else a minute for a per-minute limit, else until the provider's daily reset, else `cooldownMs`. */
   rateLimitCooldownMs?: number;
+  /** Circuit breaker: after 2 consecutive timeouts/network errors/5xx, skip the provider this long (default 60000; 0 disables). */
+  breakerMs?: number;
+  /** Per-provider default timeout, e.g. `{ groq: 10000 }`. A `timeoutMs` passed to generate() still wins. */
+  providerTimeoutMs?: Partial<Record<Provider, number>>;
+  /** Within each run of same-tier providers, reorder by observed latency and success rate once there are enough samples. Off by default. */
+  adaptiveOrder?: boolean;
   /** Total time budget for one generate() call across every provider tried. Exceeding it throws `DEADLINE_EXCEEDED`. */
   deadlineMs?: number;
   /** Hard ceiling applied to every call's `maxTokens`, for cost control when it comes from an untrusted request. */
@@ -22,6 +109,9 @@ export interface LLMCascadeOptions {
   modelResolver?: (provider: Provider) => string | null | undefined;
   onProviderFailure?: (provider: Provider, message: string) => void;
   onProviderCooldown?: (provider: Provider, cooldownMs: number) => void;
+  /** Called after every single HTTP attempt (each key x model tried). Key material is never included. */
+  onAttempt?: (attempt: AttemptInfo) => void;
+  /** Where PROVIDER-level cooldowns live (share it across processes with Redis etc.). Per-key and per-model cooldowns are always in-process. */
   cooldownStore?: {
     get(provider: Provider): number | Promise<number>;
     set(provider: Provider, until: number): void | Promise<void>;
@@ -94,26 +184,49 @@ export class LLMCascade {
   generate(params: GenerateParams & { stream: true }): Promise<StreamResult>;
   generate<T = any>(params: GenerateParams): Promise<GenerateResult<T>>;
   getLiveOrder(): Promise<Provider[]>;
-  /** Manually clear a provider's cooldown early — e.g. after your own out-of-band health check confirms it's back online. No-op if it wasn't on cooldown. */
+  /** Manually clear a provider's cooldown early (and its per-key and per-model cooldowns), e.g. after your own health check confirms it's back. No-op if it wasn't cooling. */
   clearCooldown(provider: Provider): Promise<void>;
+  /** What the cascade has done since this instance was created (in-process): per provider/model/key counters, latency, tokens, cooldowns. Keys appear by index only. */
+  stats(): Promise<CascadeStats>;
+  /** Sends one tiny request through every configured key (default: whole chain), one at a time. Spends a little real quota; never changes cooldowns. */
+  probe(options?: { providers?: Provider[]; timeoutMs?: number; maxTokens?: number }): Promise<ProbeResult[]>;
 }
 
 export function parseJsonLoose(text: string): any;
 /** Scrubs credential-looking tokens from a message. Pass `secrets` (literal key values) for deterministic redaction regardless of phrasing. */
 export function redact(message: string, secrets?: string[]): string;
 export const ALL_PROVIDERS: Provider[];
-export const DEFAULT_MODELS: Record<Provider, string>;
+export const DEFAULT_MODELS: Record<BuiltinProvider, string>;
 
 export interface ProviderInfo {
   envVar: string;
   apiStyle: string;
   baseUrl: string | null;
   defaultModel: string;
+  /** Tried after `defaultModel` on the same key(s) when it is rate-limited or retired. */
+  fallbackModels: string[];
+  /** 1 fast and roomy ... 5 paid last resort. providers.json is sorted by this, and it is the default order. */
+  tier: number;
   signupUrl: string;
   freeTierNotes: string;
+  /** Machine-readable free-tier limits where known. `scope` is what the limit is counted against. */
+  limits?: { rpm?: number; rps?: number; rpd?: number; tpm?: number; tpd?: number; perModel?: boolean; scope?: string };
+  /** Where the numbers came from: the provider's own docs, a third-party tracker, or not verified. */
+  limitsSource?: 'official' | 'tracker' | 'unverified';
+  /** e.g. `"midnight:America/Los_Angeles"`; absent means a rolling window. */
+  dayReset?: string;
+  /** A trial or credit, not a standing free tier. */
+  trial?: boolean;
+  requiresPhone?: boolean;
+  requiresCard?: boolean;
+  /** `false` = the free tier forbids commercial use. */
+  commercialOk?: boolean;
+  trainsOnData?: boolean;
+  region?: string;
+  verifiedAt?: string;
   extraHeaders?: boolean;
   /** Approximate list price per 1M tokens (blended prompt+completion) if this provider's model were used on a paid tier, at time of writing. Used to compute `shadowCostUsd`. Omitted where no meaningful paid comparison exists. */
   costPerMillionTokens?: number;
 }
 
-export const PROVIDER_INFO: Record<Provider, ProviderInfo>;
+export const PROVIDER_INFO: Record<BuiltinProvider, ProviderInfo>;
