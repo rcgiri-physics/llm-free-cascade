@@ -18,7 +18,8 @@
   },
   "scripts": {
     "test": "node --test test/cascade.test.js test/plan.test.js",
-    "check:providers": "node scripts/check-providers.js"
+    "check:providers": "node scripts/check-providers.js",
+    "build:site": "node scripts/build-site.js"
   },
   "keywords": [
     "llm",

@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llm-free-cascade</title>
+<meta name="description" content="Cascade one chat completion across every free-tier LLM API you have a key for, with reset-aware cooldowns and per-key, per-model rotation.">
+<style>
+:root{--bg:#fafaf7;--fg:#1d1d1b;--muted:#63635d;--line:#e2e1da;--card:#fff;--code:#f0efe8;--accent:#0b6b4f;--warn:#8a5a00;--warnbg:#fdf0d5;--bad:#9b1c1c;--badbg:#fbe0e0;--notebg:#e9eef5;--note:#2f4a6b}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#141413;--fg:#ecebe4;--muted:#a3a29a;--line:#2c2c29;--card:#1b1b19;--code:#242421;--accent:#58c9a0;--warn:#f0c36b;--warnbg:#3a2f14;--bad:#f09a9a;--badbg:#3d1c1c;--notebg:#1f2a38;--note:#9bbbe0}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:1040px;margin:0 auto;padding:0 16px}
+header.hero{padding:56px 0 32px}
+h1{font-size:2.2rem;line-height:1.2;margin:0 0 12px}
+h2{font-size:1.4rem;margin:48px 0 12px}
+.lead{font-size:1.15rem;color:var(--muted);max-width:42rem;margin:0 0 20px}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88em}
+code{background:var(--code);padding:1px 5px;border-radius:4px}
+pre{background:var(--code);padding:14px 16px;border-radius:8px;overflow-x:auto;margin:12px 0;line-height:1.5}
+pre code{background:none;padding:0}
+a{color:var(--accent)}
+.links a{margin-right:18px;font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+.card h3{margin:0 0 6px;font-size:1rem}
+.card p{margin:0;color:var(--muted);font-size:.95rem}
+.chain{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:14px 0}
+.chain span.node{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 12px;font-weight:600}
+.chain span.node.fail{color:var(--bad);text-decoration:line-through;font-weight:500}
+.chain span.node.ok{border-color:var(--accent);color:var(--accent)}
+.chain i{color:var(--muted);font-style:normal}
+.tools{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:8px 0 14px}
+input[type=search]{padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);font:inherit;min-width:220px}
+.legend{margin-right:12px;font-size:.88rem;color:var(--muted);white-space:nowrap}
+.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+table{border-collapse:collapse;width:100%;min-width:760px}
+th,td{text-align:left;vertical-align:top;padding:10px 12px;border-bottom:1px solid var(--line)}
+th{font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);background:var(--code)}
+tr:last-child td{border-bottom:0}
+.notes{color:var(--muted);font-size:.85rem;margin-top:3px}
+.tier{display:inline-block;min-width:1.7em;text-align:center;border-radius:6px;padding:0 6px;font-weight:700;background:var(--code)}
+.tier.t1{background:var(--accent);color:var(--bg)}
+.tag{display:inline-block;font-size:.75rem;border-radius:999px;padding:1px 8px;margin:4px 4px 0 0}
+.tag.warn{background:var(--warnbg);color:var(--warn)}.tag.bad{background:var(--badbg);color:var(--bad)}.tag.note{background:var(--notebg);color:var(--note)}
+footer{margin:56px 0 40px;color:var(--muted);font-size:.9rem}
+@media (max-width:640px){h1{font-size:1.7rem}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="hero">
+  <h1>Your app shouldn't die because Groq returned a 429.</h1>
+  <p class="lead"><code>llm-free-cascade</code> sends one chat completion through every free-tier LLM provider you have a key for, and moves on when one is rate-limited, out of quota, slow or down. Zero dependencies, Node 18+.</p>
+  <pre><code>npm install llm-free-cascade</code></pre>
+  <p class="links"><a href="https://github.com/rcgiri-physics/llm-free-cascade">GitHub</a><a href="https://www.npmjs.com/package/llm-free-cascade">npm</a><a href="https://github.com/rcgiri-physics/llm-free-cascade/blob/master/docs/GUIDE.md">Guide</a><a href="https://github.com/rcgiri-physics/llm-free-cascade/blob/master/CHANGELOG.md">Changelog</a></p>
+</header>
+
+<section>
+<pre><code>const { LLMCascade } = require('llm-free-cascade');
+
+const cascade = LLMCascade.fromEnv();   // GROQ_API_KEY, GEMINI_API_KEY, ...
+
+const { text, provider, attempts } = await cascade.generate({
+  system: 'You are a helpful assistant.',
+  user: 'Explain photosynthesis in one sentence.',
+});
+// provider: who answered. attempts: who it skipped, and why.</code></pre>
+<div class="chain" aria-label="Example chain">
+  <span class="node fail">groq (429, rests 58s)</span><i>→</i>
+  <span class="node fail">gemini (daily quota, rests until reset)</span><i>→</i>
+  <span class="node ok">cerebras answers</span>
+</div>
+</section>
+
+<h2>What a plain retry loop doesn't do</h2>
+<div class="grid">
+  <div class="card"><h3>Reset-aware cooldowns</h3><p>Reads <code>Retry-After</code> and "try again in 2m59s". Per-minute limits rest a minute; per-day limits rest until the provider's reset.</p></div>
+  <div class="card"><h3>Per-key and per-model rotation</h3><p>Keys are round-robin. Limits are usually per model, so a 429 falls to the next model on the same key first.</p></div>
+  <div class="card"><h3>Failure classification</h3><p>A too-long prompt skips one provider for one call. Timeouts and 5xx trip a circuit breaker. A bad key leaves rotation alone.</p></div>
+  <div class="card"><h3>Hard bounds</h3><p>Per-attempt timeout (idle timeout for streams) and a whole-call <code>deadlineMs</code>.</p></div>
+  <div class="card"><h3>Parse-and-retry</h3><p>A response that fails your <code>parse</code> function counts as a provider failure and the next one is tried.</p></div>
+  <div class="card"><h3>Visibility</h3><p><code>stats()</code>, <code>onAttempt</code>, <code>probe()</code> and a CLI answer "which key served what, and when does it reset?"</p></div>
+</div>
+
+<h2>Providers</h2>
+<p>Generated from <code>src/providers.json</code> (version 0.9.0). Free tiers change without notice; read each provider's own console and terms before relying on a number here. Entries marked <em>tracker</em> or <em>unverified</em> come from third-party lists, not the provider's docs.</p>
+<div class="tools">
+  <input type="search" id="q" placeholder="Filter providers, models, notes" aria-label="Filter providers">
+</div>
+<p><span class="legend"><span class="tier t1">1</span> Fast, roomy</span><span class="legend"><span class="tier t2">2</span> Solid</span><span class="legend"><span class="tier t3">3</span> Tight or niche</span><span class="legend"><span class="tier t4">4</span> Trial / unverified</span><span class="legend"><span class="tier t5">5</span> Paid last resort</span></p>
+<div class="tablewrap">
+<table id="providers">
+<thead><tr><th>Tier</th><th>Provider</th><th>Models</th><th>Free tier</th><th>Sign up</th></tr></thead>
+<tbody>
+<tr data-tier="1">
+  <td data-label="Tier"><span class="tier t1">1</span></td>
+  <td data-label="Provider"><strong>groq</strong><br><code>GROQ_API_KEY</code></td>
+  <td data-label="Models"><code>openai/gpt-oss-120b</code><br><code>qwen/qwen3.8-27b</code><br><code>openai/gpt-oss-20b</code></td>
+  <td data-label="Free tier">30 RPM, 1,000 req/day, 200,000 tokens/day · per model, per organization<div class="notes">per model: 30 RPM, 1K requests/day, 8K tokens/min, 200K tokens/day; limits are per organization, and each model has its own bucket</div><div class="flags"></div></td>
+  <td data-label="Sign up"><a href="https://console.groq.com" rel="noopener">console.groq.com</a><div class="notes">checked 2026-10-07</div></td>
+</tr>
+<tr data-tier="1">
+  <td data-label="Tier"><span class="tier t1">1</span></td>
+  <td data-label="Provider"><strong>gemini</strong><br><code>GEMINI_API_KEY</code></td>
+  <td data-label="Models"><code>gemini-3.6-flash</code></td>
+  <td data-label="Free tier">per model, per project<div class="notes">limits are per Google Cloud project (not per key) and per model; Google no longer publishes a table, see AI Studio&#39;s rate-limit page; daily quota resets at midnight Pacific; free-tier prompts may be used to improve Google products</div><div class="flags"><span class="tag warn">trains on prompts</span></div></td>
+  <td data-label="Sign up"><a href="https://aistudio.google.com" rel="noopener">aistudio.google.com</a><div class="notes">checked 2026-10-07</div></td>
+</tr>
+<tr data-tier="1">
+  <td data-label="Tier"><span class="tier t1">1</span></td>
+  <td data-label="Provider"><strong>cerebras</strong><br><code>CEREBRAS_API_KEY</code></td>
+  <td data-label="Models"><code>gpt-oss-120b</code><br><code>qwen-3.8-27b</code></td>
+  <td data-label="Free tier">5 RPM, 1,000,000 tokens/day · per model, per account<div class="notes">now a free TRIAL: $5 credit that expires 30 days after it is granted (card may be required); 5 RPM, 1M tokens/day per model while it lasts</div><div class="flags"><span class="tag warn">trial</span><span class="tag warn">card</span></div></td>
+  <td data-label="Sign up"><a href="https://inference.cerebras.ai" rel="noopener">inference.cerebras.ai</a><div class="notes">checked 2026-10-07</div></td>
+</tr>
+<tr data-tier="2">
+  <td data-label="Tier"><span class="tier t2">2</span></td>
+  <td data-label="Provider"><strong>mistral</strong><br><code>MISTRAL_API_KEY</code></td>
+  <td data-label="Models"><code>mistral-small-latest</code></td>
+  <td data-label="Free tier">1 req/s · per organization<div class="notes">Experiment tier: ~1 request/sec and a large monthly token pool (one tracker says ~1B tokens/month, another a $10 monthly credit: check your console&#39;s limits page); needs a verified phone number and opting in to data training</div><div class="flags"><span class="tag warn">phone</span><span class="tag warn">trains on prompts</span><span class="tag note">limits: tracker</span></div></td>
+  <td data-label="Sign up"><a href="https://console.mistral.ai" rel="noopener">console.mistral.ai</a><div class="notes">checked 2026-10-07</div></td>
+</tr>
+<tr data-tier="2">
+  <td data-label="Tier"><span class="tier t2">2</span></td>
+  <td data-label="Provider"><strong>nvidia</strong><br><code>NVIDIA_API_KEY</code></td>
+  <td data-label="Models"><code>meta/llama-3.1-8b-instruct</code></td>
+  <td data-label="Free tier">40 RPM · per account<div class="notes">NVIDIA NIM trial: ~40 requests/min, no published daily cap; for prototyping, not production</div><div class="flags"><span class="tag warn">phone</span><span class="tag note">limits: tracker</span></div></td>
+  <td data-label="Sign up"><a href="https://build.nvidia.com" rel="noopener">build.nvidia.com</a><div class="notes">checked 2026-10-07</div></td>
+</tr>
+<tr data-tier="2">
+  <td data-label="Tier"><span class="tier t2">2</span></td>
+  <td data-label="Provider"><strong>zhipu</strong><br><code>ZHIPU_API_KEY</code></td>
+  <td data-label="Models"><code>glm-4.7-flash</code><br><code>glm-4.5-flash</code></td>
+  <td data-label="Free tier">per account<div class="notes">GLM-4.7-Flash, GLM-4.5-Flash and GLM-4.6V-Flash are free with no expiry (concurrency-limited, can be slow); international Z.ai platform. A key from the China platform (open.bigmodel.cn) will not work here: set baseUrls: { zhipu: &#39;https://open.bigmodel.cn/api/paas/v4&#39; } or ZHIPU_BASE_URL</div><div class="flags"><span class="tag note">China-hosted</span></div></td>
+  <td data-label="Sign up"><a href="https://z.ai" rel="noopener">z.ai</a><div class="notes">checked 2026-10-07</div></td>
+</tr>
+<tr data-tier="3">
+  <td data-label="Tier"><span class="tier t3">3</span></td>
+  <td data-label="Provider"><strong>openrouter</strong><br><code>OPENROUTER_API_KEY</code></td>
+  <td data-label="Models"><code>nvidia/nemotron-3-super-120b-a12b:free</code><br><code>openrouter/free</code><br><code>google/gemma-4-31b-it:free</code><br><code>google/gemma-4-26b-a4b-it:free</code></td>
+  <td data-label="Free tier">20 RPM, 50 req/day · per global<div class="notes">gateway; &#39;:free&#39; models: 20 RPM and 50 requests/day (1,000/day once you have bought $10+ credit), enforced globally per user: extra accounts or keys do NOT raise it. The free lineup churns, &#39;openrouter/free&#39; picks one for you</div><div class="flags"></div></td>
+  <td data-label="Sign up"><a href="https://openrouter.ai" rel="noopener">openrouter.ai</a><div class="notes">checked 2026-10-07</div></td>
+</tr>
+<tr data-tier="3">
+  <td data-label="Tier"><span class="tier t3">3</span></td>
+  <td data-label="Provider"><strong>siliconflow</strong><br><code>SILICONFLOW_API_KEY</code></td>
+  <td data-label="Models"><code>Qwen/Qwen2.5-7B-Instruct</code></td>
+  <td data-label="Free tier">1000 RPM · per account<div class="notes">a few small open models are free at high rate (tracker: 1,000 RPM / 50K TPM); the international site grants ~$1 starter credit; the China site (api.siliconflow.cn) needs phone + real-name verification. Which models are free changes: run `npm run check:providers`</div><div class="flags"><span class="tag note">China-hosted</span><span class="tag note">limits: tracker</span></div></td>
+  <td data-label="Sign up"><a href="https://siliconflow.com" rel="noopener">siliconflow.com</a><div class="notes">checked 2026-10-07</div></td>
+</tr>
+<tr data-tier="3">
+  <td data-label="Tier"><span class="tier t3">3</span></td>
+  <td data-label="Provider"><strong>modelscope</strong><br><code>MODELSCOPE_API_KEY</code></td>
+  <td data-label="Models"><code>Qwen/Qwen3.5-35B-A3B</code></td>
+  <td data-label="Free tier">2,000 req/day · per model, per account<div class="notes">Alibaba&#39;s ModelScope API-Inference: ~2,000 requests/day total, at most ~500 per model (tracker); signup may need a phone number. Base URL and model id come from a tracker site, so verify them with `npm run check:providers`</div><div class="flags"><span class="tag warn">phone</span><span class="tag note">China-hosted</span><span class="tag note">limits: tracker</span></div></td>
+  <td data-label="Sign up"><a href="https://modelscope.cn" rel="noopener">modelscope.cn</a><div class="notes">checked 2026-10-07</div></td>
+</tr>
+<tr data-tier="3">
+  <td data-label="Tier"><span class="tier t3">3</span></td>
+  <td data-label="Provider"><strong>cloudflare</strong><br><code>CLOUDFLARE_API_TOKEN</code></td>
+  <td data-label="Models"><code>@cf/meta/llama-3.1-8b-instruct-fast</code></td>
+  <td data-label="Free tier">per account<div class="notes">Workers AI: 10,000 neurons/day (a few hundred small calls); small 2-8K context windows; needs CLOUDFLARE_ACCOUNT_ID</div><div class="flags"><span class="tag note">limits: tracker</span></div></td>
+  <td data-label="Sign up"><a href="https://dash.cloudflare.com" rel="noopener">dash.cloudflare.com</a><div class="notes">checked 2026-10-07</div></td>
+</tr>
+<tr data-tier="3">
+  <td data-label="Tier"><span class="tier t3">3</span></td>
+  <td data-label="Provider"><strong>huggingface</strong><br><code>HUGGINGFACE_API_KEY</code></td>
+  <td data-label="Models"><code>meta-llama/Llama-3.1-8B-Instruct</code></td>
+  <td data-label="Free tier">per account<div class="notes">only about $0.10/month of free inference credit now; backend varies by model</div><div class="flags"><span class="tag note">limits: tracker</span></div></td>
+  <td data-label="Sign up"><a href="https://huggingface.co/settings/tokens" rel="noopener">huggingface.co</a><div class="notes">checked 2026-10-07</div></td>
+</tr>
+<tr data-tier="3">
+  <td data-label="Tier"><span class="tier t3">3</span></td>
+  <td data-label="Provider"><strong>cohere</strong><br><code>COHERE_API_KEY</code></td>
+  <td data-label="Models"><code>command-r7b-12-2024</code></td>
+  <td data-label="Free tier">20 RPM · per account<div class="notes">trial key: ~20 RPM and ~1,000 requests/month; NON-COMMERCIAL use only, do not use for a production product</div><div class="flags"><span class="tag bad">non-commercial</span><span class="tag note">limits: tracker</span></div></td>
+  <td data-label="Sign up"><a href="https://dashboard.cohere.com/api-keys" rel="noopener">dashboard.cohere.com</a><div class="notes">checked 2026-10-07</div></td>
+</tr>
+<tr data-tier="4">
+  <td data-label="Tier"><span class="tier t4">4</span></td>
+  <td data-label="Provider"><strong>together</strong><br><code>TOGETHER_API_KEY</code></td>
+  <td data-label="Models"><code>meta-llama/Llama-3.3-70B-Instruct-Turbo</code></td>
+  <td data-label="Free tier">—<div class="notes">signup credit only (not a standing free tier)</div><div class="flags"><span class="tag warn">trial</span><span class="tag note">limits: unverified</span></div></td>
+  <td data-label="Sign up"><a href="https://api.together.xyz" rel="noopener">api.together.xyz</a><div class="notes">checked ?</div></td>
+</tr>
+<tr data-tier="4">
+  <td data-label="Tier"><span class="tier t4">4</span></td>
+  <td data-label="Provider"><strong>sambanova</strong><br><code>SAMBANOVA_API_KEY</code></td>
+  <td data-label="Models"><code>Meta-Llama-3.3-70B-Instruct</code></td>
+  <td data-label="Free tier">20 RPM, 200,000 tokens/day · per account<div class="notes">tightened in 2026: trial credit, and a payment method is now reportedly required; ~20 RPM / 200K tokens/day on trial models</div><div class="flags"><span class="tag warn">trial</span><span class="tag warn">card</span><span class="tag note">limits: tracker</span></div></td>
+  <td data-label="Sign up"><a href="https://cloud.sambanova.ai" rel="noopener">cloud.sambanova.ai</a><div class="notes">checked 2026-10-07</div></td>
+</tr>
+<tr data-tier="4">
+  <td data-label="Tier"><span class="tier t4">4</span></td>
+  <td data-label="Provider"><strong>pollinations</strong><br><code>POLLINATIONS_API_KEY</code></td>
+  <td data-label="Models"><code>openai-fast</code></td>
+  <td data-label="Free tier">per ip<div class="notes">no signup required for anonymous/low-rate use (1 req/15s); a free token raises the limit</div><div class="flags"></div></td>
+  <td data-label="Sign up"><a href="https://auth.pollinations.ai" rel="noopener">auth.pollinations.ai</a><div class="notes">checked 2026-10-07</div></td>
+</tr>
+<tr data-tier="4">
+  <td data-label="Tier"><span class="tier t4">4</span></td>
+  <td data-label="Provider"><strong>opencode</strong><br><code>OPENCODE_API_KEY</code></td>
+  <td data-label="Models"><code>grok-code</code></td>
+  <td data-label="Free tier">—<div class="notes">free tier available (a handful of free models, no card)</div><div class="flags"><span class="tag note">limits: unverified</span></div></td>
+  <td data-label="Sign up"><a href="https://opencode.ai/zen" rel="noopener">opencode.ai</a><div class="notes">checked ?</div></td>
+</tr>
+<tr data-tier="4">
+  <td data-label="Tier"><span class="tier t4">4</span></td>
+  <td data-label="Provider"><strong>ovh</strong><br><code>OVH_AI_ENDPOINTS_API_KEY</code></td>
+  <td data-label="Models"><code>Meta-Llama-3_3-70B-Instruct</code></td>
+  <td data-label="Free tier">12 RPM · per ip<div class="notes">EU-hosted open models; the API works without a key at a low rate (~12 RPM) but the cascade only uses providers it has a key for, so create a free account for a key. Model catalogue rotates</div><div class="flags"><span class="tag note">limits: tracker</span></div></td>
+  <td data-label="Sign up"><a href="https://endpoints.ai.cloud.ovh.net" rel="noopener">endpoints.ai.cloud.ovh.net</a><div class="notes">checked 2026-10-07</div></td>
+</tr>
+<tr data-tier="4">
+  <td data-label="Tier"><span class="tier t4">4</span></td>
+  <td data-label="Provider"><strong>llm7</strong><br><code>LLM7_API_KEY</code></td>
+  <td data-label="Models"><code>gpt-oss:20b</code><br><code>gemma4:31b</code><br><code>nemotron-3-nano:30b</code></td>
+  <td data-label="Free tier">30 RPM · per account<div class="notes">UNVERIFIED free tier: a tracker says ~30 RPM with a free token, but the live model list shows per-token prices and &#39;turbo&#39;/&#39;pro&#39; tiers. The three default models are the &#39;turbo&#39; tier. Check what your token is allowed to use before relying on it</div><div class="flags"><span class="tag note">limits: unverified</span></div></td>
+  <td data-label="Sign up"><a href="https://token.llm7.io" rel="noopener">token.llm7.io</a><div class="notes">checked 2026-10-07</div></td>
+</tr>
+<tr data-tier="5">
+  <td data-label="Tier"><span class="tier t5">5</span></td>
+  <td data-label="Provider"><strong>deepseek</strong><br><code>DEEPSEEK_API_KEY</code></td>
+  <td data-label="Models"><code>deepseek-chat</code></td>
+  <td data-label="Free tier">—<div class="notes">PAID after a small signup credit: the cheapest sensible paid fallback</div><div class="flags"><span class="tag warn">trial</span><span class="tag note">limits: unverified</span></div></td>
+  <td data-label="Sign up"><a href="https://platform.deepseek.com" rel="noopener">platform.deepseek.com</a><div class="notes">checked ?</div></td>
+</tr>
+<tr data-tier="5">
+  <td data-label="Tier"><span class="tier t5">5</span></td>
+  <td data-label="Provider"><strong>anthropic</strong><br><code>ANTHROPIC_API_KEY</code></td>
+  <td data-label="Models"><code>claude-haiku-4-5-20251001</code></td>
+  <td data-label="Free tier">—<div class="notes">paid — intended as a last-resort tier, not free</div><div class="flags"></div></td>
+  <td data-label="Sign up"><a href="https://console.anthropic.com" rel="noopener">console.anthropic.com</a><div class="notes">checked ?</div></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<h2>Check your own setup</h2>
+<pre><code>npx llm-free-cascade keys            # which providers you're missing, and where to sign up
+npx llm-free-cascade status          # order, keys, models, limits, warnings
+npx llm-free-cascade probe --watch 300   # live check of every key, every 5 minutes</code></pre>
+
+<footer>
+  MIT licensed. Rotating across providers and models you already have keys for is the intended use; many providers forbid opening several free accounts to get around a limit, so read their terms. Generated 2026-10-08.
+</footer>
+</div>
+<script>
+(function(){
+  var q=document.getElementById('q'),rows=document.querySelectorAll('#providers tbody tr');
+  q.addEventListener('input',function(){
+    var s=q.value.trim().toLowerCase();
+    rows.forEach(function(r){r.style.display=!s||r.textContent.toLowerCase().indexOf(s)>-1?'':'none';});
+  });
+})();
+</script>
+</body>
+</html>

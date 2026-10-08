@@ -11,7 +11,7 @@ free-tier model. This is a **one-file change**:
    the provider's API — free-tier availability shifts constantly, don't trust
    an unverified name from documentation alone.
 2. Edit that provider's `defaultModel` in [`src/providers.json`](src/providers.json). Nothing else needs to change.
-3. Update the table in [`README.md`](README.md) if the free-tier terms changed too.
+3. Run `npm run build:site` to regenerate the provider table on the project page (`docs/index.html`), and update the table in [`docs/GUIDE.md`](docs/GUIDE.md) if the free-tier terms changed too.
 
 Run `npm run check:providers` to see which default/fallback models the
 provider's own model list no longer has (it needs the provider's key in your
@@ -38,7 +38,7 @@ environment, except for the few that list models publicly).
    `limitsSource: "unverified"` plus an honest note over a confident guess.
 4. Only add a bespoke caller (like `callGemini`/`callAnthropic`) if the
    provider's request/response shape genuinely isn't OpenAI-compatible.
-5. Update the table in [`README.md`](README.md).
+5. Run `npm run build:site` and update the table in [`docs/GUIDE.md`](docs/GUIDE.md).
 
 ## Running tests
 
