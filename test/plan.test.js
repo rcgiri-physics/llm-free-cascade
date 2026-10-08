@@ -35,6 +35,9 @@ function fakeFetch(t, handler) {
   return calls;
 }
 
+/** Cooldowns derived from a clock (time until a slot recovers) can come out a few ms short, so compare with a little slack. */
+const near = (actual, expected, message) => assert.ok(Math.abs(actual - expected) <= 100, `${message || ""} expected ~${expected}, got ${actual}`);
+
 const sseRes = (chunks) => {
   const enc = new TextEncoder();
   return {
@@ -227,8 +230,8 @@ test('a per-minute limit with no hint cools for a minute; a per-day limit waits 
     onProviderCooldown: (p, ms) => { cooled[p] = ms; },
   });
   await cascade.generate({ system: 's', user: 'u' });
-  assert.equal(cooled.groq, 60 * 1000);
-  assert.equal(cooled.cerebras, 60 * 60 * 1000, 'rolling daily window with no clock reset is re-checked hourly');
+  near(cooled.groq, 60 * 1000, 'per-minute limit');
+  near(cooled.cerebras, 60 * 60 * 1000, 'rolling daily window with no clock reset is re-checked hourly');
 });
 
 test('rateLimitCooldownMs, when set, pins the 429 cooldown and overrides hints', async (t) => {
