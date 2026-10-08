@@ -12,7 +12,7 @@ _Researched 2026-10-07 against `llm-free-cascade@0.8.1` (published on npm 2026-0
 | P3 Watching | **Done.** `stats()`, `onAttempt`, `probe()`, CLI `status` / `probe --watch`. |
 | P4 OmniRoute | **Enabled, not recommended.** It works as a `custom` provider (see README). Not added as a default. |
 | P5 Jev | **Harness ready, trial needs your API key.** `scripts/jev-compare.js cases.jsonl` runs your labelled classification cases through Jev (real request shape from docs.typesafe.ai: `POST api.typesafe.ai/v1/systemone`, `choice` question) and through the cascade, then reports agreement, accuracy vs your labels, latency and the disagreements. Tested end to end against mock servers only. Jev needs an account/key from console.typesafe.ai (early access, paid, free tier unknown). It stays out of this package. |
-| P6 Release | **Prepared and verified, not published.** 0.9.0 + CHANGELOG, committed locally. `npm pack` is clean (7 files, 42.8 kB). mcqplex's AI tests (3 suites, 34 tests) pass against the 0.9.0 tarball swapped into its node_modules (restored to 0.8.0 afterwards). Blocked on `npm login` (npm whoami = 401): then `npm publish --access public`, bump mcqplex's pin, run its tests. `git push` not done. |
+| P6 Release | **Done.** 0.9.0 is live on npm (published 2026-10-08, after npm staged-publish approval). mcqplex pin bumped 0.8.0 -> 0.9.0 on branch `chore/llm-free-cascade-0.9.0` (committed locally, not pushed or merged); its AI tests (3 suites, 34 tests) pass against the published package. |
 
 Two plan items changed on contact with reality:
 - **GitHub Models is gone.** GitHub's docs say it was fully retired on 2026-07-30, so it was dropped from §2 and never added.
