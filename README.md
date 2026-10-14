@@ -97,7 +97,7 @@ Supported: text messages, `stream: true`, `max_tokens`,
 Safe by default: it listens on 127.0.0.1 only and rejects other Host headers
 and non-JSON requests from web pages. To listen on another address
 (`--host 0.0.0.0`) you must set `LLM_CASCADE_SERVER_KEY`; clients then send it
-as their API key. Programmatic use: `require('llm-free-cascade/src/server.js').createServer({ cascade })`.
+as their API key. Details: [Guide → OpenAI-compatible server](docs/GUIDE.md#openai-compatible-server).
 
 ## Common recipes
 
@@ -144,7 +144,8 @@ models you already have keys for is the intended use.
 ## Documentation
 
 - **[Guide](docs/GUIDE.md)**: every option, in depth (cooldowns, timeouts,
-  errors, hooks, stats, custom providers, cost and input hygiene).
+  errors, hooks, stats, custom providers, the OpenAI-compatible server, cost
+  and input hygiene).
 - **[Project page](https://rcgiri-physics.github.io/llm-free-cascade/)**: the
   provider table, generated from `providers.json`.
 - **[Changelog](CHANGELOG.md)** · **[Contributing](CONTRIBUTING.md)**: fixing a
