@@ -73,6 +73,32 @@ npx llm-free-cascade probe --watch 300      # ...repeated every 5 minutes
 npx llm-free-cascade keys                   # which providers you're missing, and where to sign up
 ```
 
+## Use it from any OpenAI client
+
+Run the cascade as a local OpenAI-compatible endpoint and point any tool that
+takes a custom base URL at it (Python `openai`, LangChain, Open WebUI,
+Continue, Aider, ...):
+
+```bash
+npx llm-free-cascade serve            # http://127.0.0.1:8787/v1
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="unused")
+r = client.chat.completions.create(model="cascade", messages=[{"role": "user", "content": "hi"}])
+```
+
+`model: "cascade"` uses the whole chain; a provider name (`"groq"`) pins one.
+Supported: text messages, `stream: true`, `max_tokens`,
+`response_format: json_object`, `GET /v1/models`. Tool calls, images and
+`n > 1` return a clear 400 rather than being ignored.
+
+Safe by default: it listens on 127.0.0.1 only and rejects other Host headers
+and non-JSON requests from web pages. To listen on another address
+(`--host 0.0.0.0`) you must set `LLM_CASCADE_SERVER_KEY`; clients then send it
+as their API key. Programmatic use: `require('llm-free-cascade/src/server.js').createServer({ cascade })`.
+
 ## Common recipes
 
 ```js

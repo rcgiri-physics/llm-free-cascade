@@ -8,6 +8,8 @@
  *   status                           what is configured: order, keys, models, free-tier limits
  *   probe  [--watch N] [--json]      one tiny request per key, to catch dead keys / retired models
  *          [--provider a,b]
+ *   serve  [--port 8787] [--host 127.0.0.1]
+ *                                    OpenAI-compatible local endpoint (key: LLM_CASCADE_SERVER_KEY)
  *
  * It never signs up for anything on your behalf: it only tells you what's
  * missing and, if you ask, opens the signup pages or writes a .env skeleton
@@ -24,7 +26,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { PROVIDER_INFO, LLMCascade } = require('../src/index.js');
 
-const USAGE = 'Usage: llm-free-cascade keys [--open] [--env] | status | probe [--watch N] [--json] [--provider a,b]';
+const USAGE = 'Usage: llm-free-cascade keys [--open] [--env] | status | probe [--watch N] [--json] [--provider a,b] | serve [--port N] [--host H]';
 
 function isConfigured(envVar) {
   if (String(process.env[envVar] || '').trim()) return true;
@@ -195,12 +197,49 @@ async function runProbe(args) {
   }
 }
 
+function runServe(args) {
+  const flag = (name, fallback) => {
+    const at = args.indexOf(name);
+    return at >= 0 && args[at + 1] && !args[at + 1].startsWith('--') ? args[at + 1] : fallback;
+  };
+  const port = Number(flag('--port', process.env.PORT || 8787));
+  const host = flag('--host', '127.0.0.1');
+  // Read from the environment only: a key on the command line shows up in `ps` and shell history.
+  const apiKey = String(process.env.LLM_CASCADE_SERVER_KEY || '').trim() || undefined;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    console.log('--port needs a number between 1 and 65535.');
+    process.exitCode = 1;
+    return;
+  }
+
+  const { createServer } = require('../src/server.js');
+  let server;
+  try {
+    server = createServer({ host, apiKey, log: (line) => console.log(`${new Date().toLocaleTimeString()} ${line}`) });
+  } catch (err) {
+    console.log(`${err.message}
+(set LLM_CASCADE_SERVER_KEY to expose it beyond this machine)`);
+    process.exitCode = 1;
+    return;
+  }
+  server.on('error', (err) => { console.error(err.message); process.exitCode = 1; });
+  server.listen(port, host, () => {
+    const shown = host.includes(':') ? `[${host}]` : host;
+    console.log(`
+llm-free-cascade OpenAI-compatible server on http://${shown}:${port}/v1`);
+    console.log(`  base URL: http://${shown}:${port}/v1   model: "cascade" (or a provider name to pin one)`);
+    console.log(apiKey ? '  auth: Bearer key required (LLM_CASCADE_SERVER_KEY)' : '  auth: none (loopback only). Any non-empty api key works in clients.');
+    console.log('  Ctrl+C to stop.\n');
+  });
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0] && !args[0].startsWith('--') ? args[0] : 'keys';
 
   if (command === 'status') return printStatus();
   if (command === 'probe') return runProbe(args.slice(1));
+  if (command === 'serve') return runServe(args.slice(1));
 
   if (command !== 'keys') {
     console.log(`Unknown command "${command}". ${USAGE}`);
