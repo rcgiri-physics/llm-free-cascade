@@ -487,6 +487,70 @@ new LLMCascade({ keys: { zhipu: key }, baseUrls: { zhipu: 'https://open.bigmodel
 > adds a second layer that argues with the first. It is most useful as one late
 > tier, or for discovering which obscure free providers currently work.
 
+## OpenAI-compatible server
+
+`npx llm-free-cascade serve` runs the cascade as a local HTTP endpoint that
+speaks the OpenAI chat-completions API, so tools you didn't write can use it.
+
+```bash
+npx llm-free-cascade serve                     # http://127.0.0.1:8787/v1
+npx llm-free-cascade serve --port 9000
+LLM_CASCADE_SERVER_KEY=choose-a-secret npx llm-free-cascade serve --host 0.0.0.0
+```
+
+Point the client's base URL at `http://127.0.0.1:8787/v1`. Without a server
+key, any non-empty API key works in the client (many refuse an empty one).
+
+| Endpoint | Notes |
+|---|---|
+| `POST /v1/chat/completions` | Plain and `stream: true` (SSE, ends with `data: [DONE]`). |
+| `GET /v1/models` | `cascade` plus each configured provider. |
+| `GET /health` | `{ "ok": true }`, no auth. |
+
+**Request mapping.** `system` and `developer` messages are joined into the
+system prompt; `user`/`assistant` turns become `messages`. Content may be a
+string or an array of `text` parts. `max_tokens` / `max_completion_tokens` map
+to `maxTokens`; `response_format: { type: "json_object" }` maps to `json: true`.
+`model: "cascade"` (or no model) runs the whole chain; a provider name such as
+`"groq"` pins that provider; anything else is a 404 `model_not_found`. The
+response's `model` field is the provider that answered.
+
+**Rejected with a 400, never silently dropped:** `tools` / `functions` /
+`tool_choice`, `tool` role messages, image/audio/file parts, `n > 1`,
+`response_format: json_schema`. Other OpenAI parameters (`temperature`,
+`top_p`, ...) are currently ignored.
+
+**Errors** use OpenAI's `{ error: { message, type, code } }` shape:
+`ALL_RATE_LIMITED` is a 429 with `Retry-After`, `DEADLINE_EXCEEDED` a 504,
+every provider failing a 502. Provider error text is not returned to the
+client; the server's console log shows the status and code per request.
+
+**Safety defaults.**
+- Binds to `127.0.0.1`. Any other `--host` is refused unless
+  `LLM_CASCADE_SERVER_KEY` is set; clients then send it as
+  `Authorization: Bearer <key>`. The key is read from the environment only.
+- Without a key, requests whose `Host` header is not a loopback name are
+  refused (stops DNS-rebinding pages in your browser).
+- No CORS headers and `Content-Type: application/json` required, so web pages
+  can't call it.
+- 1 MB request bodies, `max_tokens` capped at 8192, 120 s deadline per call.
+
+Use a key and a firewall before exposing it to a network: every caller spends
+your free quota.
+
+**From code**, to use your own cascade options:
+
+```js
+const { LLMCascade } = require('llm-free-cascade');
+const { createServer } = require('llm-free-cascade/src/server.js');
+
+const cascade = LLMCascade.fromEnv({ maxTokensLimit: 4096, deadlineMs: 60000 });
+createServer({ cascade, apiKey: process.env.LLM_CASCADE_SERVER_KEY }).listen(8787, '127.0.0.1');
+```
+
+`createServer` refuses a non-loopback `host` option without `apiKey`; pass the
+same host you give `listen()`.
+
 ## Supported providers
 
 [`src/providers.json`](../src/providers.json) is the single source of truth for

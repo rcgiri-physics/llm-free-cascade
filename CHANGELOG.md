@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.0
+
+### Added
+- **OpenAI-compatible server** (`npx llm-free-cascade serve`, `src/server.js`):
+  `/v1/chat/completions` (plain and streaming) and `/v1/models`, so any OpenAI
+  client can use the cascade. Loopback-only by default; binding elsewhere
+  requires `LLM_CASCADE_SERVER_KEY`. Host-header check against DNS rebinding,
+  JSON-only bodies, 1 MB body cap, `max_tokens` capped at 8192, 120 s deadline,
+  provider error text never forwarded. Tools, images and `n > 1` are rejected
+  with a 400. Requested in rcgiri-physics/llm-free-cascade#1.
+
 ## 0.9.0
 
 Fixes what made the cascade slow when it had several keys and models, and
