@@ -83,8 +83,32 @@ const { text, provider, attempts } = await cascade.generate({
   <div class="card"><h3>Visibility</h3><p><code>stats()</code>, <code>onAttempt</code>, <code>probe()</code> and a CLI answer "which key served what, and when does it reset?"</p></div>
 </div>
 
+<h2>Use it from any OpenAI client</h2>
+<p>Not writing Node? Run the cascade as a local OpenAI-compatible endpoint and point any tool that takes a custom base URL at it: the Python <code>openai</code> SDK, LangChain, Open WebUI, Continue, Aider.</p>
+<pre><code>npx llm-free-cascade serve            # http://127.0.0.1:8787/v1</code></pre>
+<pre><code>from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8787/v1", api_key="unused")
+client.chat.completions.create(model="cascade", messages=[{"role": "user", "content": "hi"}])</code></pre>
+<p><code>model: "cascade"</code> uses the whole chain; a provider name such as <code>"groq"</code> pins one. Streaming, <code>max_tokens</code> and JSON mode are supported; tool calls and images return a clear 400. It listens on 127.0.0.1 only, and refuses any other address unless <code>LLM_CASCADE_SERVER_KEY</code> is set. <a href="https://github.com/rcgiri-physics/llm-free-cascade/blob/master/docs/GUIDE.md#openai-compatible-server">Details</a>.</p>
+
+<h2>Local fallback with Ollama</h2>
+<p><a href="https://ollama.com/">Ollama</a> runs models on your own machine: no quota and no key, just slower. Add it as the last tier so the cascade never runs dry.</p>
+<pre><code>new LLMCascade({
+  keys: { ... },
+  custom: {
+    ollama: {
+      baseUrl: 'http://localhost:11434/v1',
+      model: 'llama3.2',
+      apiKey: 'ollama', // any non-empty value; a provider without a key is skipped
+      tier: 5,          // after every free cloud provider
+    },
+  },
+  providerTimeoutMs: { ollama: 120_000 },
+});</code></pre>
+<p>Or set <code>LLM_CUSTOM_PROVIDERS</code> to the same object as JSON, which also works with <code>serve</code>. <a href="https://github.com/rcgiri-physics/llm-free-cascade/blob/master/docs/GUIDE.md#local-models-ollama">Details</a>.</p>
+
 <h2>Providers</h2>
-<p>Generated from <code>src/providers.json</code> (version 0.9.0). Free tiers change without notice; read each provider's own console and terms before relying on a number here. Entries marked <em>tracker</em> or <em>unverified</em> come from third-party lists, not the provider's docs.</p>
+<p>Generated from <code>src/providers.json</code> (version 0.10.0). Free tiers change without notice; read each provider's own console and terms before relying on a number here. Entries marked <em>tracker</em> or <em>unverified</em> come from third-party lists, not the provider's docs.</p>
 <div class="tools">
   <input type="search" id="q" placeholder="Filter providers, models, notes" aria-label="Filter providers">
 </div>
@@ -240,10 +264,11 @@ const { text, provider, attempts } = await cascade.generate({
 <h2>Check your own setup</h2>
 <pre><code>npx llm-free-cascade keys            # which providers you're missing, and where to sign up
 npx llm-free-cascade status          # order, keys, models, limits, warnings
-npx llm-free-cascade probe --watch 300   # live check of every key, every 5 minutes</code></pre>
+npx llm-free-cascade probe --watch 300   # live check of every key, every 5 minutes
+npx llm-free-cascade serve           # OpenAI-compatible endpoint on 127.0.0.1:8787</code></pre>
 
 <footer>
-  MIT licensed. Rotating across providers and models you already have keys for is the intended use; many providers forbid opening several free accounts to get around a limit, so read their terms. Generated 2026-10-08.
+  MIT licensed. Rotating across providers and models you already have keys for is the intended use; many providers forbid opening several free accounts to get around a limit, so read their terms. Generated 2026-10-14.
 </footer>
 </div>
 <script>
