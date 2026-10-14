@@ -122,6 +122,34 @@ for await (const chunk of stream) process.stdout.write(chunk);
 new LLMCascade({ keys: { ... }, custom: { mygw: { baseUrl: 'https://gw.example/v1', models: ['auto'], apiKey } } });
 ```
 
+### Local fallback with Ollama
+
+[Ollama](https://ollama.com/) runs models on your own machine: no quota, no
+key, slower. Add it as the last tier so the cascade never runs dry:
+
+```bash
+ollama pull llama3.2
+```
+
+```js
+new LLMCascade({
+  keys: { ... },
+  custom: {
+    ollama: {
+      baseUrl: 'http://localhost:11434/v1',
+      model: 'llama3.2',
+      apiKey: 'ollama', // any non-empty value; a custom provider without a key is skipped
+      tier: 5,          // after every free cloud provider
+    },
+  },
+  providerTimeoutMs: { ollama: 120_000 }, // local models can be slow on CPU
+});
+```
+
+Or without code (also works with `serve`):
+`LLM_CUSTOM_PROVIDERS='{"ollama":{"baseUrl":"http://localhost:11434/v1","model":"llama3.2","apiKey":"ollama","tier":5}}'`.
+See the [guide](docs/GUIDE.md#local-models-ollama) for details.
+
 When every provider fails, `generate()` rejects with an `LLMCascadeError`
 carrying `code`, a suggested `statusCode` and redacted `failures`.
 

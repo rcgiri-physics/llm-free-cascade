@@ -478,6 +478,58 @@ international `api.z.ai`) — use `baseUrls` or `<PROVIDER>_BASE_URL`:
 new LLMCascade({ keys: { zhipu: key }, baseUrls: { zhipu: 'https://open.bigmodel.cn/api/paas/v4' } });
 ```
 
+### Local models (Ollama)
+
+[Ollama](https://ollama.com/) serves an OpenAI-compatible API at
+`http://localhost:11434/v1`, so it joins as a custom provider. It has no
+rate limit and no key, which makes it a good last tier: when every free cloud
+provider is cooling down, the call still gets an answer.
+
+```bash
+ollama pull llama3.2      # or qwen2.5, gemma3, mistral, ...
+```
+
+```js
+const cascade = new LLMCascade({
+  keys: { groq: process.env.GROQ_API_KEY, gemini: process.env.GEMINI_API_KEY },
+  custom: {
+    ollama: {
+      baseUrl: 'http://localhost:11434/v1',
+      models: ['llama3.2', 'qwen2.5'], // tried in order, like any model list
+      apiKey: 'ollama',
+      tier: 5,
+    },
+  },
+  providerTimeoutMs: { ollama: 120_000 },
+});
+```
+
+Things to know:
+- **`apiKey` is required.** Ollama ignores it, but a provider without a key is
+  dropped from the chain, the same as a built-in provider with no key. Any
+  non-empty string works.
+- **Raise its timeout.** The default per-attempt timeout is 30 s, and a model
+  on CPU (or loading into memory on the first call) can take longer. A
+  timeout counts as a failure and, after two in a row, trips the circuit
+  breaker for a minute.
+- **`tier: 5` puts it last** in the default order. Use a lower tier, or
+  `order`, to prefer it (for example to keep sensitive prompts on the machine:
+  `generate({ ..., order: ['ollama'] })`).
+- **Model names** must match `ollama list`. A model that isn't pulled returns
+  a 404, which the cascade treats as a retired model and moves on.
+- **`json: true`** maps to `response_format: json_object`, which Ollama
+  supports. Quality depends heavily on the model's size.
+- **Another machine:** an `http://` base URL is accepted only for localhost.
+  For Ollama on another host, put it behind HTTPS.
+
+With `serve`, use the environment form so no code is needed:
+
+```bash
+LLM_CUSTOM_PROVIDERS='{"ollama":{"baseUrl":"http://localhost:11434/v1","model":"llama3.2","apiKey":"ollama","tier":5}}' npx llm-free-cascade serve
+```
+
+`model: "ollama"` in a client request then pins the local model.
+
 > **A gateway is not a free lunch.** OmniRoute and similar tools hold *every*
 > key you give them, so put a password on them (OmniRoute's default dashboard
 > password is the literal `CHANGEME`) and don't expose the port. Some of their
