@@ -173,5 +173,5 @@ test('probe allows room for reasoning models, and empty responses give the finis
   global.fetch = async (u, o) => { sent = JSON.parse(o.body).max_tokens; return json({ choices: [{ message: { content: '' }, finish_reason: 'length' }] }); };
   const [result] = await new LLMCascade({ keys: { groq: 'a' } }).probe();
   assert.equal(sent, 256);
-  assert.match(result.message, /empty response (finish_reason: length)/);
+  assert.ok(result.message.includes("empty response (finish_reason: length)"), result.message);
 });
