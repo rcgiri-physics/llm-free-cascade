@@ -34,7 +34,7 @@ test('status shows a configured provider and never prints its key', () => {
 });
 
 test('serve refuses a public host without a server key', () => {
-  const r = cli(['serve', '--host', '0.0.0.0', '--port', '0'], { GROQ_API_KEY: 'k' });
+  const r = cli(['serve', '--host', '0.0.0.0', '--port', '18787'], { GROQ_API_KEY: 'k' });
   assert.notEqual(r.status, 0);
   assert.match(r.stdout + r.stderr, /API key|LLM_CASCADE_SERVER_KEY/);
 });
