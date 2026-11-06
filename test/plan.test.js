@@ -111,7 +111,11 @@ test('classifyFailure separates request-specific, rate, auth, model and fatal fa
   assert.equal(classifyFailure('gemini HTTP 403: quota exceeded'), 'rate');
   assert.equal(classifyFailure('groq HTTP 401: invalid api key'), 'auth');
   assert.equal(classifyFailure('groq HTTP 404: The model `x` does not exist'), 'model');
-  assert.equal(classifyFailure('groq HTTP 400: bad model'), 'fatal');
+  assert.equal(classifyFailure('groq HTTP 400: bad model'), 'request');
+  assert.equal(classifyFailure('gemini HTTP 400: API key not valid'), 'auth');
+  assert.equal(classifyFailure('openrouter HTTP 402: payment required'), 'auth');
+  assert.equal(classifyFailure('groq HTTP 500: upstream, 429 tokens processed'), 'fatal');
+  assert.equal(classifyFailure('groq network error: timed out after 5ms'), 'fatal');
   assert.equal(classifyFailure('groq HTTP 500: boom'), 'fatal');
 });
 

@@ -463,7 +463,7 @@ test('rateLimitCooldownMs is used for 429s, cooldownMs for structural failures',
   let calls = 0;
   global.fetch = async () => (++calls === 1
     ? { ok: false, status: 429, json: async () => ({ error: { message: 'rate limit exceeded' } }) }
-    : { ok: false, status: 400, json: async () => ({ error: { message: 'bad model' } }) });
+    : { ok: false, status: 404, json: async () => ({ error: { message: 'bad model' } }) });
 
   const cooled = [];
   const cascade = new LLMCascade({

@@ -6,10 +6,8 @@
  * Every provider it knows about has (or had, at time of writing) a free tier —
  * the point is to stack several free accounts instead of paying for one.
  *
- * Supported providers: gemini, groq, cerebras, sambanova, mistral, openrouter,
- * together, deepseek, cohere, huggingface, cloudflare, zhipu, nvidia,
- * opencode, pollinations, anthropic (paid, intended as a last-resort tier
- * rather than a free one).
+ * The supported providers are listed in providers.json. DeepSeek and Anthropic
+ * are paid, and intended as a last-resort tier rather than a free one.
  *
  * Zero dependencies — uses global fetch (Node 18+).
  */
@@ -58,7 +56,10 @@ const ROLLING_DAY_RECHECK_MS = 60 * 60 * 1000;
 // timeout again on every call.
 const BREAKER_THRESHOLD = 2;
 const DEFAULT_BREAKER_MS = 60 * 1000;
+const MAX_BREAKER_MS = 15 * 60 * 1000;
 const LATENCY_SAMPLES = 50;
+// Sent as the bearer token by a `keyless` custom provider (Ollama and the like ignore it).
+const NO_KEY = 'no-key-required';
 const CUSTOM_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const FORBIDDEN_CUSTOM_HEADERS = new Set(['authorization', 'content-type', 'content-length', 'host', 'x-api-key', 'x-goog-api-key']);
 
@@ -93,10 +94,29 @@ const CONTEXT_RE = /context.{0,30}(length|window)|maximum.{0,20}(context|length)
  *  - `fatal`: anything else; stop retrying this provider.
  */
 function classifyFailure(message = '') {
-  if (/\bHTTP (400|413|422)\b/.test(message) && CONTEXT_RE.test(message)) return 'request';
-  if (/\b429\b|quota|rate.?limit|too many requests|exhaust/i.test(message)) return 'rate';
-  if (/\b(401|403)\b|invalid.{0,12}key|api key|unauthori[sz]ed|forbidden/i.test(message)) return 'auth';
-  if (/\bHTTP 404\b|model.{0,40}(not found|does not exist|decommission|deprecat|no longer|not supported|unavailable)|(unknown|invalid|unsupported).{0,20}model/i.test(message)) return 'model';
+  const status = Number(/^\S* ?HTTP (\d{3})\b/.exec(message)?.[1]) || null;
+  const rateText = /quota|rate.?limit|too many requests|exhaust/i;
+  const authText = /invalid.{0,12}key|api key|unauthori[sz]ed|forbidden/i;
+  const modelText = /model.{0,40}(not found|does not exist|decommission|deprecat|no longer|not supported|unavailable)|(unknown|invalid|unsupported).{0,20}model/i;
+
+  if (status) {
+    // The status decides; the text only refines it. Error text can contain
+    // anything ("429 tokens processed" on a 500), so it never overrides a 5xx.
+    if (status >= 500) return 'fatal';
+    if (status === 429) return 'rate';
+    if (status === 402) return 'auth'; // this account is out of credit; another key may not be
+    if (status === 404) return 'model';
+    if (status === 401 || status === 403) return rateText.test(message) ? 'rate' : 'auth';
+    if ((status === 400 || status === 413 || status === 422) && CONTEXT_RE.test(message)) return 'request';
+    if (rateText.test(message)) return 'rate';
+    if (authText.test(message)) return 'auth'; // Gemini reports a bad key as a 400
+    if (modelText.test(message)) return 'model';
+    return 'request'; // any other 4xx is about this request, not the provider's health
+  }
+  if (/network error|timed out|unparseable/i.test(message)) return 'fatal';
+  if (/\b429\b/.test(message) || rateText.test(message)) return 'rate';
+  if (/\b(401|403)\b/.test(message) || authText.test(message)) return 'auth';
+  if (modelText.test(message)) return 'model';
   return 'fatal';
 }
 
@@ -188,6 +208,7 @@ function withRetry(err, res) {
 function prefixError(prefix, err) {
   const out = new Error(`${prefix} ${err.message}`);
   if (err.retryAfterMs) out.retryAfterMs = err.retryAfterMs;
+  if (err.requestSpecific) out.requestSpecific = true;
   return out;
 }
 
@@ -257,14 +278,15 @@ function timeoutMessage(err, ms) {
  *   `<provider> network error: ...`  — DNS/TCP/TLS failure or timeout
  *   `<provider> HTTP <status>: ...`  — non-2xx, with the provider's own detail
  */
-async function fetchJson(provider, url, options, timeoutMs) {
+async function fetchJson(provider, url, options, timeoutMs, signal) {
   const controller = new AbortController();
   const ms = resolveTimeout(timeoutMs);
   const timer = setTimeout(() => controller.abort(), ms);
+  const unlink = linkSignal(signal, controller);
   try {
     let res;
     try {
-      res = await fetch(url, { ...options, signal: controller.signal });
+      res = await fetch(url, { ...options, redirect: 'error', signal: controller.signal });
     } catch (err) {
       throw new Error(`${provider} network error: ${timeoutMessage(err, ms)}`);
     }
@@ -279,7 +301,17 @@ async function fetchJson(provider, url, options, timeoutMs) {
     }
   } finally {
     clearTimeout(timer);
+    unlink();
   }
+}
+
+/** Aborts `controller` when the caller's `signal` fires. Returns the function that removes the link. */
+function linkSignal(signal, controller) {
+  if (!signal) return () => {};
+  const onAbort = () => controller.abort();
+  if (signal.aborted) onAbort();
+  else signal.addEventListener('abort', onAbort, { once: true });
+  return () => signal.removeEventListener('abort', onAbort);
 }
 
 /**
@@ -298,11 +330,12 @@ async function fetchJson(provider, url, options, timeoutMs) {
  * `.return()`, which runs `finally` just like a thrown error would) — so an
  * abandoned stream never leaks an open reader/socket.
  */
-async function* streamSSE(url, options, { firstByteMs, idleMs }) {
+async function* streamSSE(url, options, { firstByteMs, idleMs, signal }) {
   const controller = new AbortController();
   const connectMs = resolveTimeout(firstByteMs);
   const quietMs = resolveTimeout(idleMs);
   let timer = setTimeout(() => controller.abort(), connectMs);
+  const unlink = linkSignal(signal, controller);
   const rearm = () => {
     clearTimeout(timer);
     timer = setTimeout(() => controller.abort(), quietMs);
@@ -310,18 +343,21 @@ async function* streamSSE(url, options, { firstByteMs, idleMs }) {
 
   let res;
   try {
-    res = await fetch(url, { ...options, signal: controller.signal });
+    res = await fetch(url, { ...options, redirect: 'error', signal: controller.signal });
   } catch (err) {
     clearTimeout(timer);
+    unlink();
     throw new Error(`network error: ${timeoutMessage(err, connectMs)}`);
   }
   if (!res.ok) {
     const detail = await extractErrorDetail(res); // read while the timer is still armed
     clearTimeout(timer);
+    unlink();
     throw withRetry(new Error(`HTTP ${res.status}: ${detail}`), res);
   }
   if (!res.body) {
     clearTimeout(timer);
+    unlink();
     throw new Error('returned an empty response body');
   }
 
@@ -340,37 +376,83 @@ async function* streamSSE(url, options, { firstByteMs, idleMs }) {
       if (chunk.done) break;
       gotData = true;
       rearm();
-      buffer += decoder.decode(chunk.value, { stream: true });
-      if (buffer.length > MAX_SSE_EVENT_BYTES) {
-        throw new Error(`SSE event exceeded ${MAX_SSE_EVENT_BYTES} bytes without a boundary`);
-      }
+      // The SSE spec allows CRLF. Normalizing the whole buffer also covers a
+      // \r\n pair split across two chunks. A trailing \r waits for its \n.
+      buffer = (buffer + decoder.decode(chunk.value, { stream: true })).replace(/\r\n/g, '\n');
       let boundary;
       while ((boundary = buffer.indexOf('\n\n')) !== -1) {
         const rawEvent = buffer.slice(0, boundary);
         buffer = buffer.slice(boundary + 2);
-        for (const line of rawEvent.split('\n')) {
-          if (!line.startsWith('data:')) continue;
-          const payload = line.slice(5).trim();
+        for (const payload of ssePayloads(rawEvent)) {
           if (payload === '[DONE]') return;
           yield payload;
         }
       }
+      if (buffer.length > MAX_SSE_EVENT_BYTES) {
+        throw new Error(`SSE event exceeded ${MAX_SSE_EVENT_BYTES} bytes without a boundary`);
+      }
+    }
+    // A final event is valid without a trailing blank line.
+    for (const payload of ssePayloads((buffer + decoder.decode()).replace(/\r\n/g, '\n'))) {
+      if (payload === '[DONE]') return;
+      yield payload;
     }
   } finally {
     reader.releaseLock();
     controller.abort(); // no-op if the stream already ended naturally
     clearTimeout(timer);
+    unlink();
   }
+}
+
+function ssePayloads(rawEvent) {
+  return rawEvent.split('\n')
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trim());
+}
+
+/** The human-readable part of an error body, across the shapes providers use. */
+function errorText(body) {
+  const b = Array.isArray(body) ? body[0] : body;
+  if (!b || typeof b !== 'object') return undefined;
+  const candidates = [b.error?.message, b.error, b.message, b.detail, b.errors?.[0]?.message];
+  return candidates.find((c) => typeof c === 'string' && c);
 }
 
 async function extractErrorDetail(res) {
   try {
-    const body = await res.json();
-    const detail = body?.error?.message || body?.message;
+    let body;
+    let raw;
+    if (typeof res.text === 'function') {
+      raw = await res.text();
+      try { body = JSON.parse(raw); } catch { /* not JSON: use the raw text */ }
+    } else {
+      body = await res.json();
+    }
+    const detail = errorText(body) || (body === undefined && raw ? raw.trim() : undefined);
     return detail ? String(detail).slice(0, MAX_ERROR_DETAIL_CHARS) : `HTTP ${res.status}`;
   } catch {
     return `HTTP ${res.status}`;
   }
+}
+
+/** An error event sent inside an otherwise successful stream, as an Error the cascade can classify. */
+function streamEventError(data) {
+  if (!data?.error && data?.type !== 'error') return null;
+  const detail = errorText(data) || 'stream error';
+  const code = Number(data.error?.code ?? data.error?.status);
+  const status = code >= 400 && code < 600 ? code : data.error?.type === 'overloaded_error' ? 529 : null;
+  return new Error(status ? `HTTP ${status}: ${detail}` : `stream error: ${detail}`);
+}
+
+const GEMINI_FINISH = { STOP: 'stop', MAX_TOKENS: 'length', SAFETY: 'content_filter', RECITATION: 'content_filter', BLOCKLIST: 'content_filter', PROHIBITED_CONTENT: 'content_filter', SPII: 'content_filter' };
+const ANTHROPIC_FINISH = { end_turn: 'stop', stop_sequence: 'stop', max_tokens: 'length', refusal: 'content_filter', tool_use: 'tool_calls' };
+
+/** OpenAI content is normally a string, but some providers return an array of parts. */
+function contentText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) return content.map((p) => (typeof p === 'string' ? p : typeof p?.text === 'string' ? p.text : '')).join('');
+  return '';
 }
 
 /**
@@ -394,7 +476,9 @@ function redact(message, secrets = []) {
   }
   return out
     .replace(/\b(api[ _-]?key|authorization|bearer)\b([ \t]{0,4}[:=]?[ \t]{0,4})[A-Za-z0-9._-]{8,}/gi, '$1$2[redacted]')
-    .replace(/\bBearer[ \t]{1,4}[A-Za-z0-9._-]{8,}/gi, 'Bearer [redacted]');
+    .replace(/\bBearer[ \t]{1,4}[A-Za-z0-9._-]{8,}/gi, 'Bearer [redacted]')
+    .replace(/\b(?:sk|gsk|csk|nvapi|hf)[-_][A-Za-z0-9_-]{16,}/g, '[redacted]')
+    .replace(/\bAIza[A-Za-z0-9_-]{30,}/g, '[redacted]');
 }
 
 // Plain string ops instead of `/\s*```\s*$/` — that regex is quadratic on a
@@ -501,13 +585,19 @@ function invalidInput(message) {
 
 // ---- request-body builders (shared by the blocking and streaming callers) ----
 
-function geminiBody({ system, messages, json, maxTokens, noThinking }) {
+const finite = (n) => Number.isFinite(n);
+
+function geminiBody({ system, messages, json, maxTokens, noThinking, temperature, topP, stop, seed }) {
   const body = {
-    system_instruction: { parts: [{ text: system }] },
     // Gemini's wire format calls the assistant turn "model", not "assistant".
     contents: messages.map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
     generationConfig: { maxOutputTokens: maxTokens },
   };
+  if (system) body.system_instruction = { parts: [{ text: system }] };
+  if (finite(temperature)) body.generationConfig.temperature = temperature;
+  if (finite(topP)) body.generationConfig.topP = topP;
+  if (stop) body.generationConfig.stopSequences = stop;
+  if (finite(seed)) body.generationConfig.seed = seed;
   if (json) body.generationConfig.responseMimeType = 'application/json';
   // gemini-2.5-flash "thinks" by default, spending the output budget on
   // reasoning before any JSON — which can starve short structured calls into
@@ -517,19 +607,27 @@ function geminiBody({ system, messages, json, maxTokens, noThinking }) {
   return body;
 }
 
-function openAICompatBody({ system, messages, json, maxTokens, model, stream }) {
+function openAICompatBody({ system, messages, json, maxTokens, model, stream, temperature, topP, stop, seed }) {
   const body = {
     model,
-    messages: [{ role: 'system', content: system }, ...messages],
+    messages: system ? [{ role: 'system', content: system }, ...messages] : messages,
     max_tokens: maxTokens,
   };
+  if (finite(temperature)) body.temperature = temperature;
+  if (finite(topP)) body.top_p = topP;
+  if (stop) body.stop = stop;
+  if (finite(seed)) body.seed = seed;
   if (json) body.response_format = { type: 'json_object' };
   if (stream) body.stream = true;
   return body;
 }
 
-function anthropicBody({ system, messages, json, schema, maxTokens, model, stream }) {
-  const body = { model, max_tokens: maxTokens, system, messages };
+function anthropicBody({ system, messages, json, schema, maxTokens, model, stream, temperature, topP, stop }) {
+  const body = { model, max_tokens: maxTokens, messages };
+  if (system) body.system = system;
+  if (finite(temperature)) body.temperature = temperature;
+  if (finite(topP)) body.top_p = topP;
+  if (stop) body.stop_sequences = stop;
   if (json && schema) body.output_config = { format: { type: 'json_schema', schema } };
   if (stream) body.stream = true;
   return body;
@@ -544,15 +642,19 @@ async function callGemini(opts) {
     method: 'POST',
     headers: jsonHeaders({ 'x-goog-api-key': apiKey }),
     body: JSON.stringify(geminiBody(opts)),
-  }, attemptTimeoutMs);
+  }, attemptTimeoutMs, opts.signal);
 
   const candidate = data.candidates?.[0];
   const text = (candidate?.content?.parts || []).map((p) => p.text || '').join('').trim();
   if (!text) {
     const reason = candidate?.finishReason || data.promptFeedback?.blockReason;
-    throw new Error(`gemini returned no content${reason ? ` (${reason})` : ''}`);
+    const err = new Error(`gemini returned no content${reason ? ` (${reason})` : ''}`);
+    // A safety block is about this prompt. Gemini itself is fine.
+    if (reason && reason !== 'MAX_TOKENS') err.requestSpecific = true;
+    throw err;
   }
-  return { text, usage: normalizeUsage(data.usageMetadata) };
+  const finish = candidate?.finishReason;
+  return { text, usage: normalizeUsage(data.usageMetadata), finishReason: GEMINI_FINISH[finish] || (finish ? 'other' : undefined) };
 }
 
 /** Shared OpenAI-compatible caller (Groq, Cerebras, SambaNova, Mistral, OpenRouter, Together, DeepSeek, Cohere, HF, Cloudflare). */
@@ -562,11 +664,11 @@ async function callOpenAICompat(opts) {
     method: 'POST',
     headers: jsonHeaders({ authorization: `Bearer ${apiKey}`, ...extraHeaders }),
     body: JSON.stringify(openAICompatBody(opts)),
-  }, attemptTimeoutMs);
+  }, attemptTimeoutMs, opts.signal);
 
-  const text = (data.choices?.[0]?.message?.content || '').trim();
+  const text = contentText(data.choices?.[0]?.message?.content).trim();
   if (!text) throw new Error(`${provider} returned an empty response`);
-  return { text, usage: normalizeUsage(data.usage) };
+  return { text, usage: normalizeUsage(data.usage), finishReason: data.choices?.[0]?.finish_reason || undefined };
 }
 
 async function callAnthropic(opts) {
@@ -575,11 +677,11 @@ async function callAnthropic(opts) {
     method: 'POST',
     headers: jsonHeaders({ 'x-api-key': apiKey, 'anthropic-version': ANTHROPIC_VERSION }),
     body: JSON.stringify(anthropicBody(opts)),
-  }, attemptTimeoutMs);
+  }, attemptTimeoutMs, opts.signal);
 
   const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
   if (!text) throw new Error('anthropic returned an empty response');
-  return { text, usage: normalizeUsage(data.usage) };
+  return { text, usage: normalizeUsage(data.usage), finishReason: ANTHROPIC_FINISH[data.stop_reason] || (data.stop_reason ? 'other' : undefined) };
 }
 
 // Cloudflare account IDs are 32 hex chars. The ID is spliced into a URL
@@ -631,7 +733,7 @@ function callProviderWithKey(provider, meta, opts, apiKey, model) {
   return Promise.reject(new Error(`${provider}: unknown apiStyle "${meta.apiStyle}"`));
 }
 
-const streamTimeouts = (opts) => ({ firstByteMs: opts.attemptTimeoutMs ?? opts.timeoutMs, idleMs: opts.timeoutMs });
+const streamTimeouts = (opts) => ({ firstByteMs: opts.attemptTimeoutMs ?? opts.timeoutMs, idleMs: opts.timeoutMs, signal: opts.signal });
 
 async function* streamGemini(opts) {
   const { apiKey, model, baseUrl } = opts;
@@ -644,6 +746,11 @@ async function* streamGemini(opts) {
     }, streamTimeouts(opts))) {
       let data;
       try { data = JSON.parse(payload); } catch { continue; }
+      const eventError = streamEventError(data);
+      if (eventError) throw eventError;
+      const finish = data.candidates?.[0]?.finishReason;
+      if (finish && opts.info) opts.info.finishReason = GEMINI_FINISH[finish] || 'other';
+      if (data.usageMetadata && opts.info) opts.info.usage = normalizeUsage(data.usageMetadata);
       const text = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
       if (text) yield text;
     }
@@ -663,7 +770,14 @@ async function* streamOpenAICompat(opts) {
     }, streamTimeouts(opts))) {
       let data;
       try { data = JSON.parse(payload); } catch { continue; }
-      const delta = data.choices?.[0]?.delta?.content;
+      const eventError = streamEventError(data);
+      if (eventError) throw eventError;
+      const finish = data.choices?.[0]?.finish_reason;
+      if (finish && opts.info) opts.info.finishReason = finish;
+      // Reported by the providers that include usage in a stream without being asked.
+      const usage = data.usage || data.x_groq?.usage;
+      if (usage && opts.info) opts.info.usage = normalizeUsage(usage);
+      const delta = contentText(data.choices?.[0]?.delta?.content);
       if (delta) yield delta;
     }
   } catch (err) {
@@ -681,6 +795,19 @@ async function* streamAnthropic(opts) {
     }, streamTimeouts(opts))) {
       let data;
       try { data = JSON.parse(payload); } catch { continue; }
+      const eventError = streamEventError(data);
+      if (eventError) throw eventError;
+      if (opts.info) {
+        if (data.type === 'message_start' && data.message?.usage) opts.info.usage = normalizeUsage(data.message.usage);
+        if (data.type === 'message_delta') {
+          if (data.delta?.stop_reason) opts.info.finishReason = ANTHROPIC_FINISH[data.delta.stop_reason] || 'other';
+          const output = data.usage?.output_tokens;
+          if (output != null) {
+            const prompt = opts.info.usage?.promptTokens;
+            opts.info.usage = { promptTokens: prompt, completionTokens: output, totalTokens: prompt != null ? prompt + output : undefined };
+          }
+        }
+      }
       if (data.type === 'content_block_delta' && data.delta?.type === 'text_delta') yield data.delta.text;
     }
   } catch (err) {
@@ -742,7 +869,7 @@ function buildMeta(options) {
       freeTierNotes: 'custom provider',
       custom: true,
     };
-    const supplied = c.apiKeys ?? c.apiKey;
+    const supplied = c.apiKeys ?? c.apiKey ?? (c.keyless === true ? NO_KEY : undefined);
     if (supplied) customKeys[name] = Array.isArray(supplied) ? supplied : [supplied];
   }
 
@@ -766,6 +893,7 @@ function buildMeta(options) {
  * @property {number} [breakerMs=60000] - circuit breaker: after 2 consecutive timeouts/network errors/5xx from a provider, skip it for this long instead of paying the timeout on every call. 0 disables.
  * @property {Object<string,number>} [providerTimeoutMs] - per-provider default timeout (e.g. `{ groq: 10000 }` so a fast provider fails fast). A `timeoutMs` passed to `generate()` still wins.
  * @property {boolean} [adaptiveOrder=false] - within each run of same-tier providers, reorder by observed latency and success rate once there are enough samples. Providers with too few samples keep their place.
+ * @property {boolean} [sticky=false] - try the provider that last succeeded first, so a conversation stays on one provider while it keeps working.
  * @property {number} [deadlineMs] - total time budget for one `generate()` call across every provider it tries. Without it, the worst case is `timeoutMs` × (number of providers). Exceeding it throws an LLMCascadeError with code `DEADLINE_EXCEEDED`.
  * @property {number} [maxTokensLimit] - hard ceiling applied to every call's `maxTokens`, so a caller-supplied value can never exceed it (cost control when `maxTokens` comes from an untrusted request).
  * @property {string} [appName] - sent as OpenRouter's X-Title header.
@@ -801,6 +929,8 @@ class LLMCascade {
     this.breakerMs = options.breakerMs ?? DEFAULT_BREAKER_MS;
     this.providerTimeoutMs = options.providerTimeoutMs || {};
     this.adaptiveOrder = Boolean(options.adaptiveOrder);
+    this.sticky = Boolean(options.sticky);
+    this._lastGood = null;
     this.deadlineMs = options.deadlineMs;
     this.maxTokensLimit = options.maxTokensLimit;
     this.appName = options.appName;
@@ -825,6 +955,8 @@ class LLMCascade {
     this._cool = new Map();
     this._rr = new Map();
     this._transient = new Map();
+    this._breakerTrips = new Map();
+    this._localCooldown = new Map(); // used only for a cooldown the shared store failed to record
     this._stats = new Map();
     this._startedAt = Date.now();
 
@@ -837,7 +969,10 @@ class LLMCascade {
     }
     // Every key we hold, so redaction can scrub the literal value from any
     // provider error regardless of how the provider phrased it.
-    this._secrets = Object.values(this.keys).flat();
+    this._secrets = Object.values(this.keys).flat().filter((k) => k !== NO_KEY);
+    for (const m of Object.values(meta)) {
+      if (m.custom) this._secrets.push(...Object.values(m.headers).filter((v) => v.length >= 8));
+    }
 
     // Registry order is tier order (providers.json is kept sorted by tier);
     // custom providers slot in by their `tier`. A stable sort, so equal tiers
@@ -853,8 +988,7 @@ class LLMCascade {
   }
 
   /**
-   * Build a cascade straight from process.env, using the same var names
-   * ai.service.js does: GEMINI_API_KEY, GEMINI_API_KEY_2..9, GROQ_API_KEY, etc.
+   * Build a cascade straight from process.env: GEMINI_API_KEY, GEMINI_API_KEY_2..9, GROQ_API_KEY, etc.
    * A comma-separated primary var (`GEMINI_API_KEY=key1,key2`) also works.
    * Also reads `<PROVIDER>_BASE_URL` (e.g. ZHIPU_BASE_URL) and
    * `LLM_CUSTOM_PROVIDERS` (a JSON object of custom providers).
@@ -922,12 +1056,21 @@ class LLMCascade {
     const store = this.cooldownStore;
     // One round-trip for the whole chain when the store supports it (Redis
     // MGET etc.); otherwise N parallel gets.
-    const untils = typeof store.getMany === 'function'
-      ? await store.getMany(order)
-      : await Promise.all(order.map((p) => store.get(p)));
-    const live = order.filter((p, i) => (untils?.[i] || 0) <= now);
+    let untils;
+    try {
+      untils = typeof store.getMany === 'function'
+        ? await store.getMany(order)
+        : await Promise.all(order.map((p) => store.get(p)));
+    } catch {
+      untils = []; // a broken shared store must not take the fallback chain down with it
+    }
+    const live = order.filter((p, i) => Math.max(untils?.[i] || 0, this._localCooldown.get(p) || 0) <= now);
     const chain = live.length ? live : order; // never starve to zero
-    return this.adaptiveOrder ? this._adaptiveSort(chain) : chain;
+    const sorted = this.adaptiveOrder ? this._adaptiveSort(chain) : chain;
+    if (this.sticky && sorted.includes(this._lastGood)) {
+      return [this._lastGood, ...sorted.filter((p) => p !== this._lastGood)];
+    }
+    return sorted;
   }
 
   async _liveOrder() {
@@ -947,7 +1090,9 @@ class LLMCascade {
    * @param {string} provider
    */
   async clearCooldown(provider) {
-    await this.cooldownStore.set(provider, 0);
+    this._localCooldown.delete(provider);
+    this._breakerTrips.delete(provider);
+    try { await this.cooldownStore.set(provider, 0); } catch { /* store unavailable; local state is cleared */ }
     for (const key of [...this._cool.keys()]) {
       if (key.startsWith(`k:${provider}:`) || key.startsWith(`m:${provider}:`) || key.startsWith(`s:${provider}:`)) this._cool.delete(key);
     }
@@ -962,7 +1107,11 @@ class LLMCascade {
    */
   async _coolDown(provider, stillLive, ms) {
     if (!stillLive.some((p) => p !== provider)) return false; // it's all we have — keep trying it
-    await this.cooldownStore.set(provider, Date.now() + ms);
+    try {
+      await this.cooldownStore.set(provider, Date.now() + ms);
+    } catch {
+      this._localCooldown.set(provider, Date.now() + ms);
+    }
     if (typeof this.onProviderCooldown === 'function') {
       try { this.onProviderCooldown(provider, ms); } catch { /* observability hook — never break the cascade */ }
     }
@@ -1150,7 +1299,9 @@ class LLMCascade {
       const s = this._stats.get(provider);
       const keyCount = this.keys[provider].length;
       const models = this._modelsFor(provider);
-      const providerUntil = Number(await this.cooldownStore.get(provider)) || 0;
+      let storedUntil = 0;
+      try { storedUntil = Number(await this.cooldownStore.get(provider)) || 0; } catch { /* store unavailable */ }
+      const providerUntil = Math.max(storedUntil, this._localCooldown.get(provider) || 0);
       const sorted = s ? [...s.samples].sort((a, b) => a - b) : [];
       const pct = (p) => (sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))] : null);
 
@@ -1251,7 +1402,7 @@ class LLMCascade {
    *  - a request-specific failure (prompt too long) is rethrown immediately,
    *    tagged `requestSpecific`, so the caller doesn't cool the provider for it.
    */
-  async _tryProvider(provider, run) {
+  async _tryProvider(provider, run, { timeoutMs, deadline = Infinity, signal } = {}) {
     const keys = this.keys[provider] || [];
     if (!keys.length) throw new Error(`${provider}: no API key configured`);
     const slots = this._slotsFor(provider, this._modelsFor(provider), keys.length);
@@ -1264,12 +1415,15 @@ class LLMCascade {
     for (const slot of ready) {
       // An earlier failure in this loop may have cooled this slot's model or key.
       if (!forced && this._slotUntil(provider, slot) > Date.now()) continue;
+      const left = deadline - Date.now();
+      if (left <= 0) break; // _runCascade reports DEADLINE_EXCEEDED
       const started = Date.now();
       try {
-        const result = await run(keys[slot.keyIndex], slot.model);
+        const result = await run(keys[slot.keyIndex], slot.model, Math.min(timeoutMs ?? left, left));
         this._recordAttempt(provider, slot, { ok: true, ms: Date.now() - started, usage: result?.usage });
-        return result;
+        return { ...result, model: slot.model };
       } catch (err) {
+        if (signal?.aborted) throw err; // the caller gave up; this says nothing about the provider
         lastErr = err;
         const kind = classifyFailure(err.message);
         this._recordAttempt(provider, slot, { ok: false, ms: Date.now() - started, kind, error: this._redact(err.message) });
@@ -1291,13 +1445,23 @@ class LLMCascade {
 
   /** Starts a stream on one key+model and pulls its FIRST chunk, so a provider that fails immediately still falls over (see _tryProvider). */
   async _openStream(provider, opts, apiKey, model) {
-    const gen = streamProviderWithKey(provider, this._meta[provider], opts, apiKey, model);
+    const info = { usage: undefined, finishReason: undefined };
+    const gen = streamProviderWithKey(provider, this._meta[provider], { ...opts, info }, apiKey, model);
+    const record = () => {
+      const u = info.usage;
+      if (!u) return;
+      const tokens = this._statsFor(provider).tokens;
+      tokens.prompt += u.promptTokens || 0;
+      tokens.completion += u.completionTokens || 0;
+      tokens.total += u.totalTokens || 0;
+    };
     const first = await gen.next();
     // Mirrors the non-streaming "returned an empty response" — without
     // this an empty stream would count as success and block fallback.
     if (first.done) throw new Error(`${provider} returned an empty response`);
     return {
       provider,
+      info,
       stream: (async function* () {
         // If the consumer breaks out right after this already-buffered
         // first chunk, execution never reaches `yield* gen` below, so a
@@ -1312,6 +1476,7 @@ class LLMCascade {
           if (typeof gen.return === 'function') {
             try { await gen.return(); } catch { /* best-effort cleanup */ }
           }
+          record();
         }
       })(),
     };
@@ -1329,29 +1494,32 @@ class LLMCascade {
    * *before* the winner, for callers who want to see/log the fallback path
    * without wrapping `generate()` themselves.
    */
-  async _runCascade(chain, attempt, timeoutFor) {
+  async _runCascade(chain, attempt, timeoutFor, signal) {
     const failures = [];
     const hasDeadline = Number.isFinite(this.deadlineMs) && this.deadlineMs > 0;
     const deadline = hasDeadline ? Date.now() + this.deadlineMs : Infinity;
     // Shrinks as providers are cooled down during this call, so the last one
     // standing is never cooled (there'd be nothing left for the next call).
     let stillLive = chain;
+    const aborted = () => new LLMCascadeError('The call was aborted by the caller.', 499, 'ABORTED', failures);
+    const pastDeadline = () => new LLMCascadeError(
+      `Deadline of ${this.deadlineMs}ms exceeded after ${failures.length} provider(s). ${describe(failures)}`,
+      504,
+      'DEADLINE_EXCEEDED',
+      failures
+    );
 
     for (const provider of chain) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) {
-        throw new LLMCascadeError(
-          `Deadline of ${this.deadlineMs}ms exceeded after ${failures.length} provider(s). ${describe(failures)}`,
-          504,
-          'DEADLINE_EXCEEDED',
-          failures
-        );
-      }
+      if (signal?.aborted) throw aborted();
+      if (deadline - Date.now() <= 0) throw pastDeadline();
       try {
-        const result = await attempt(provider, Math.min(timeoutFor(provider), remaining));
+        const result = await attempt(provider, { timeoutMs: timeoutFor(provider), deadline, signal });
         this._transient.delete(provider);
+        this._breakerTrips.delete(provider);
+        this._lastGood = provider;
         return { ...result, attempts: failures };
       } catch (err) {
+        if (signal?.aborted) throw aborted();
         const message = this._redact(err.message);
         failures.push({ provider, message });
         if (typeof this.onProviderFailure === 'function') {
@@ -1363,7 +1531,12 @@ class LLMCascade {
         } else if (!err.requestSpecific && isTransientFailure(err.message)) {
           const streak = (this._transient.get(provider) || 0) + 1;
           this._transient.set(provider, streak);
-          if (streak >= BREAKER_THRESHOLD && this.breakerMs > 0) ms = this.breakerMs;
+          if (streak >= BREAKER_THRESHOLD && this.breakerMs > 0) {
+            // Doubles each time it trips again without a success in between.
+            const trips = this._breakerTrips.get(provider) || 0;
+            this._breakerTrips.set(provider, trips + 1);
+            ms = Math.min(this.breakerMs * 2 ** trips, MAX_BREAKER_MS);
+          }
         }
         if (ms != null && await this._coolDown(provider, stillLive, ms)) {
           stillLive = stillLive.filter((p) => p !== provider);
@@ -1372,7 +1545,8 @@ class LLMCascade {
       }
     }
 
-    const allRateLimited = failures.every((f) => f.message.includes('429'));
+    if (deadline - Date.now() <= 0) throw pastDeadline();
+    const allRateLimited = failures.every((f) => /\bHTTP 429\b/.test(f.message));
     throw new LLMCascadeError(
       `All providers failed. ${describe(failures)}`,
       allRateLimited ? 429 : 502,
@@ -1398,6 +1572,13 @@ class LLMCascade {
    */
   async generate(params) {
     const messages = normalizeMessages(params);
+    if (params.system != null && typeof params.system !== 'string') throw invalidInput('"system" must be a string');
+    if (params.signal?.aborted) throw new LLMCascadeError('The call was aborted by the caller.', 499, 'ABORTED');
+    const stop = params.stop == null ? undefined : [].concat(params.stop);
+    if (stop && (!stop.length || !stop.every((s) => typeof s === 'string' && s))) throw invalidInput('"stop" must be a non-empty string or array of strings');
+    for (const name of ['temperature', 'topP', 'seed']) {
+      if (params[name] != null && !Number.isFinite(params[name])) throw invalidInput(`"${name}" must be a number`);
+    }
 
     const requestedOrder = Array.isArray(params.order) && params.order.length
       ? this._withKeys(params.order)
@@ -1420,6 +1601,7 @@ class LLMCascade {
     const opts = {
       ...params,
       messages,
+      stop,
       maxTokens: resolveMaxTokens(params.maxTokens, this.maxTokensLimit),
       appName: this.appName,
       referer: this.referer,
@@ -1430,22 +1612,23 @@ class LLMCascade {
     if (opts.stream) {
       return this._runCascade(
         chain,
-        (provider, attemptTimeoutMs) => this._tryProvider(provider, (apiKey, model) => this._openStream(provider, { ...opts, attemptTimeoutMs }, apiKey, model)),
-        timeoutFor
+        (provider, budget) => this._tryProvider(provider, (apiKey, model, attemptTimeoutMs) => this._openStream(provider, { ...opts, attemptTimeoutMs }, apiKey, model), budget),
+        timeoutFor,
+        params.signal
       );
     }
 
-    return this._runCascade(chain, async (provider, attemptTimeoutMs) => {
-      const { text, usage } = await this._tryProvider(provider, (apiKey, model) => (
+    return this._runCascade(chain, async (provider, budget) => {
+      const { text, usage, finishReason, model } = await this._tryProvider(provider, (apiKey, model, attemptTimeoutMs) => (
         callProviderWithKey(provider, this._meta[provider], { ...opts, attemptTimeoutMs }, apiKey, model)
-      ));
+      ), budget);
       const parsed = typeof opts.parse === 'function' ? opts.parse(text) : undefined;
       const costPerMillionTokens = this._meta[provider]?.costPerMillionTokens;
       const shadowCostUsd = usage?.totalTokens != null && costPerMillionTokens != null
         ? (usage.totalTokens / 1e6) * costPerMillionTokens
         : undefined;
-      return { text, parsed, provider, usage, shadowCostUsd };
-    }, timeoutFor);
+      return { text, parsed, provider, model, finishReason, usage, shadowCostUsd };
+    }, timeoutFor, params.signal);
   }
 }
 

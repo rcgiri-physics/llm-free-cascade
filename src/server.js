@@ -15,8 +15,8 @@
  *  - no CORS headers, and only `application/json` bodies, so a web page can't
  *    send it a request the browser would allow without a preflight.
  *  - request bodies capped (1 MB), `max_tokens` capped, total deadline per call.
- *  - unsupported features (tools, images, n > 1) are rejected with a 400
- *    instead of being silently dropped.
+ *  - unsupported features (tools, images, n > 1, non-default penalties, ...) are
+ *    rejected with a 400 instead of being silently dropped.
  *  - error responses carry the error code only; provider error text (already
  *    redacted) is not forwarded to the client.
  */
@@ -99,6 +99,16 @@ function toGenerateParams(body, providers) {
     throw bad('Tool and function calling are not supported by this server yet.', 'unsupported_parameter');
   }
   if (body.n != null && body.n !== 1) throw bad('Only n = 1 is supported.', 'unsupported_parameter');
+  // These change the output, so dropping them would be a silent wrong answer.
+  // Their default values are harmless, and some clients always send them.
+  for (const name of ['frequency_penalty', 'presence_penalty']) {
+    if (body[name]) throw bad(`"${name}" is not supported.`, 'unsupported_parameter');
+  }
+  if (body.logprobs) throw bad('"logprobs" is not supported.', 'unsupported_parameter');
+  if (body.logit_bias && Object.keys(body.logit_bias).length) throw bad('"logit_bias" is not supported.', 'unsupported_parameter');
+  for (const name of ['temperature', 'top_p', 'seed']) {
+    if (body[name] != null && !Number.isFinite(body[name])) throw bad(`"${name}" must be a number.`);
+  }
 
   const system = [];
   const messages = [];
@@ -133,6 +143,10 @@ function toGenerateParams(body, providers) {
     messages,
     json: fmt === 'json_object',
     maxTokens: maxTokens ?? undefined,
+    temperature: body.temperature ?? undefined,
+    topP: body.top_p ?? undefined,
+    seed: body.seed ?? undefined,
+    stop: body.stop ?? undefined,
     order,
     stream: body.stream === true,
   };
@@ -157,6 +171,7 @@ function errorBody(err) {
 function fromCascadeError(err) {
   if (err instanceof LLMCascadeError) {
     if (err.code === 'INVALID_INPUT') return bad(err.message);
+    if (err.code === 'ABORTED') return new HttpError(499, 'Client closed the request.', 'api_error', err.code);
     if (err.code === 'ALL_RATE_LIMITED') return new HttpError(429, 'Every provider is rate-limited right now. Retry later.', 'rate_limit_error', err.code);
     if (err.code === 'DEADLINE_EXCEEDED') return new HttpError(504, 'The cascade ran out of time.', 'timeout_error', err.code);
     return new HttpError(err.statusCode >= 500 ? err.statusCode : 502, 'Every provider failed. Check `npx llm-free-cascade probe`.', 'api_error', err.code);
@@ -185,7 +200,8 @@ function createServer(options = {}) {
     if (!apiKey && !isLoopbackHost(hostName(req.headers.host))) {
       throw new HttpError(403, 'Forbidden host.', 'permission_error');
     }
-    const url = new URL(req.url, 'http://localhost');
+    let url;
+    try { url = new URL(req.url, 'http://localhost'); } catch { throw bad('Invalid request URL.'); }
     const path = url.pathname.replace(/\/+$/, '');
 
     if (path === '/health' && req.method === 'GET') return sendJson(res, 200, { ok: true });
@@ -204,7 +220,7 @@ function createServer(options = {}) {
 
     if (path !== '/v1/chat/completions') throw new HttpError(404, 'Not found.', 'invalid_request_error');
     if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed.', 'invalid_request_error');
-    if (!String(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) {
+    if (String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase() !== 'application/json') {
       throw new HttpError(415, 'Content-Type must be application/json.', 'invalid_request_error');
     }
 
@@ -218,37 +234,47 @@ function createServer(options = {}) {
     const created = Math.floor(Date.now() / 1000);
     const started = Date.now();
 
+    // Stop spending quota as soon as the client goes away.
+    const abort = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) abort.abort(); });
+
     let result;
-    try { result = await cascade.generate(params); } catch (e) { throw fromCascadeError(e); }
-    const model = result.provider;
+    try { result = await cascade.generate({ ...params, signal: abort.signal }); } catch (e) { throw fromCascadeError(e); }
+    const model = result.model || result.provider;
+    const providerHeader = { 'x-llm-provider': result.provider };
 
     if (!params.stream) {
-      log(`200 ${model} ${Date.now() - started}ms`);
+      log(`200 ${result.provider} ${model} ${Date.now() - started}ms`);
       return sendJson(res, 200, {
         id, object: 'chat.completion', created, model,
-        choices: [{ index: 0, message: { role: 'assistant', content: result.text }, finish_reason: 'stop' }],
+        choices: [{ index: 0, message: { role: 'assistant', content: result.text }, finish_reason: result.finishReason || 'stop' }],
         usage: usageOut(result.usage),
-      });
+      }, providerHeader);
     }
 
-    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive', ...providerHeader });
     const chunk = (delta, finish = null) => `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
-    // Stop pulling from the provider if the client goes away.
     let closed = false;
     res.on('close', () => { closed = true; });
     res.write(chunk({ role: 'assistant', content: '' }));
     try {
       for await (const text of result.stream) {
         if (closed) break;
-        res.write(chunk({ content: text }));
+        // Respect backpressure, so a slow client can't grow our memory.
+        if (!res.write(chunk({ content: text }))) {
+          await new Promise((resolve) => {
+            res.once('drain', resolve);
+            res.once('close', resolve);
+          });
+        }
       }
-      if (!closed) res.write(chunk({}, 'stop'));
+      if (!closed) res.write(chunk({}, result.info?.finishReason || 'stop'));
     } catch {
       // Headers are already sent: report in-band, the way OpenAI does.
       if (!closed) res.write(`data: ${JSON.stringify({ error: { message: 'The provider stream failed.', type: 'api_error', code: null } })}\n\n`);
     }
     if (!closed) res.end('data: [DONE]\n\n');
-    log(`200 ${model} stream ${Date.now() - started}ms`);
+    log(`200 ${result.provider} ${model} stream ${Date.now() - started}ms`);
   }
 
   const server = http.createServer((req, res) => {
@@ -259,7 +285,9 @@ function createServer(options = {}) {
       sendJson(res, e.status, errorBody(e), e.status === 429 ? { 'retry-after': '30' } : {});
     });
   });
-  server.requestTimeout = 0; // long generations and streams; the cascade has its own deadline
+  // Time to RECEIVE the request. Responses aren't covered, so long generations
+  // are unaffected, and a client that uploads slowly can't hold a socket forever.
+  server.requestTimeout = 60000;
   server.headersTimeout = 30000;
   return server;
 }
