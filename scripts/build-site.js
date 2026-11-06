@@ -128,7 +128,7 @@ const { text, provider, attempts } = await cascade.generate({
 <div class="chain" aria-label="Example chain">
   <span class="node fail">groq (429, rests 58s)</span><i>→</i>
   <span class="node fail">gemini (daily quota, rests until reset)</span><i>→</i>
-  <span class="node ok">cerebras answers</span>
+  <span class="node ok">gemini answers</span>
 </div>
 </section>
 

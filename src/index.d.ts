@@ -1,7 +1,7 @@
 export type BuiltinProvider =
-  | 'groq' | 'gemini' | 'cerebras' | 'mistral' | 'nvidia' | 'zhipu'
-  | 'openrouter' | 'siliconflow' | 'modelscope' | 'cloudflare' | 'huggingface' | 'cohere'
-  | 'together' | 'sambanova' | 'pollinations' | 'opencode' | 'ovh' | 'llm7'
+  | 'groq' | 'gemini' | 'mistral' | 'nvidia' | 'zhipu'
+  | 'openrouter' | 'siliconflow' | 'modelscope' | 'cloudflare' | 'cohere'
+  | 'pollinations' | 'opencode' | 'ovh'
   | 'deepseek' | 'anthropic';
 
 /** A built-in provider, or the name of a `custom` provider you registered. */
@@ -19,6 +19,10 @@ export interface CustomProvider {
   tier?: number;
   /** Extra request headers (Authorization / Content-Type / Host are not allowed). */
   headers?: Record<string, string>;
+  /** Context window in tokens. A prompt that won't fit skips this provider. */
+  contextTokens?: number;
+  /** Set for an endpoint that needs no key (Ollama and the like), so it joins the chain without a placeholder `apiKey`. */
+  keyless?: boolean;
   /** When a daily limit resets, e.g. `"midnight:America/Los_Angeles"`. Default: re-check hourly. */
   dayReset?: string;
 }
@@ -92,12 +96,16 @@ export interface LLMCascadeOptions {
   cooldownMs?: number;
   /** Pins the cooldown after a rate-limit/quota (429). When NOT set it is reset-aware: Retry-After, else a hint in the error text, else a minute for a per-minute limit, else until the provider's daily reset, else `cooldownMs`. */
   rateLimitCooldownMs?: number;
-  /** Circuit breaker: after 2 consecutive timeouts/network errors/5xx, skip the provider this long (default 60000; 0 disables). */
+  /** Circuit breaker: after 2 consecutive timeouts/network errors/5xx, skip the provider this long (default 60000; 0 disables). Doubles each time it trips again without a success in between, up to 15 minutes. */
   breakerMs?: number;
   /** Per-provider default timeout, e.g. `{ groq: 10000 }`. A `timeoutMs` passed to generate() still wins. */
   providerTimeoutMs?: Partial<Record<Provider, number>>;
   /** Within each run of same-tier providers, reorder by observed latency and success rate once there are enough samples. Off by default. */
   adaptiveOrder?: boolean;
+  /** Provider -> context window in tokens. A provider the prompt plus `maxTokens` would not fit in is skipped without a request, unless nothing fits. The prompt size is a rough estimate (characters / 4). */
+  contextTokens?: Partial<Record<Provider, number>>;
+  /** Try the provider that last succeeded first, so a conversation stays on one provider while it keeps working. Off by default. */
+  sticky?: boolean;
   /** Total time budget for one generate() call across every provider tried. Exceeding it throws `DEADLINE_EXCEEDED`. */
   deadlineMs?: number;
   /** Hard ceiling applied to every call's `maxTokens`, for cost control when it comes from an untrusted request. */
@@ -126,13 +134,24 @@ export interface ChatMessage {
 }
 
 export interface GenerateParams {
-  system: string;
+  /** System prompt. Left out of the request when omitted. */
+  system?: string;
   /** Single-turn user message. Ignored if `messages` is given; one of the two is required. */
   user?: string;
   /** Full conversation history, for multi-turn calls. Takes precedence over `user` when both are given. Validated strictly (roles `user`/`assistant` only, non-empty string content, first turn `user`); a bad history rejects with `INVALID_INPUT` before any provider is called. */
   messages?: ChatMessage[];
   json?: boolean;
   maxTokens?: number;
+  temperature?: number;
+  topP?: number;
+  /** Stop sequence(s). */
+  stop?: string | string[];
+  /** Best effort. Not every provider honours it, and Anthropic has no equivalent. */
+  seed?: number;
+  /** Streams only: if a stream fails after text was sent, try the rest of the chain and call this first, so you can discard the partial answer. Without it, the failure rejects the stream. */
+  onRestart?: (event: { from: Provider; to: Provider; error: string }) => void;
+  /** Abort the call. Rejects with code `ABORTED`; no provider is penalised for it. */
+  signal?: AbortSignal;
   /** Gemini only: disables "thinking" (`thinkingBudget: 0`) for deterministic/structured calls. Ignored by every other provider. */
   noThinking?: boolean;
   parse?: (text: string) => any;
@@ -158,6 +177,10 @@ export interface GenerateResult<T = any> {
   text: string;
   parsed: T | undefined;
   provider: Provider;
+  /** The model that answered. */
+  model: string;
+  /** `stop`, `length` (cut off by maxTokens), `content_filter`, ... `undefined` if the provider didn't say. */
+  finishReason: string | undefined;
   usage: Usage | undefined;
   /** Estimated cost in USD had this call gone to a paid tier, based on `providers.json`'s `costPerMillionTokens`. `undefined` when usage or a known price isn't available. Informational only — not a real charge. */
   shadowCostUsd: number | undefined;
@@ -168,12 +191,15 @@ export interface GenerateResult<T = any> {
 export interface StreamResult {
   stream: AsyncIterable<string>;
   provider: Provider;
+  model: string;
+  /** Filled in as the stream runs; complete once it ends. `usage` stays undefined for providers that don't report it in a stream. */
+  info: { usage: Usage | undefined; finishReason: string | undefined };
   attempts: ProviderFailure[];
 }
 
 export class LLMCascadeError extends Error {
   statusCode: number;
-  code: 'ALL_RATE_LIMITED' | 'ALL_PROVIDERS_FAILED' | 'DEADLINE_EXCEEDED' | 'INVALID_INPUT' | null;
+  code: 'ALL_RATE_LIMITED' | 'ALL_PROVIDERS_FAILED' | 'DEADLINE_EXCEEDED' | 'INVALID_INPUT' | 'ABORTED' | null;
   /** One entry per provider attempted, in order. */
   failures: ProviderFailure[];
 }
@@ -192,6 +218,15 @@ export class LLMCascade {
   probe(options?: { providers?: Provider[]; timeoutMs?: number; maxTokens?: number }): Promise<ProbeResult[]>;
 }
 
+export interface CooldownStore {
+  get(provider: Provider): number | Promise<number>;
+  set(provider: Provider, until: number): void | Promise<void>;
+  getMany?(providers: Provider[]): number[] | Promise<number[]>;
+}
+/** A cooldownStore in a small JSON file, so provider cooldowns survive a restart. Holds no keys. */
+export function fileCooldownStore(filePath: string): CooldownStore;
+/** OpenRouter's free models right now, largest context window first. Needs no key. */
+export function discoverFreeModels(options?: { timeoutMs?: number }): Promise<{ id: string; name: string; contextLength: number | null }[]>;
 export function parseJsonLoose(text: string): any;
 /** Scrubs credential-looking tokens from a message. Pass `secrets` (literal key values) for deterministic redaction regardless of phrasing. */
 export function redact(message: string, secrets?: string[]): string;

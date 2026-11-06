@@ -83,7 +83,7 @@ const { text, parsed, provider } = await cascade.generate({
 ```js
 const cascade = new LLMCascade({
   keys: { ... },
-  order: ['groq', 'cerebras', 'gemini'], // only these three, in this order
+  order: ['groq', 'mistral', 'gemini'], // only these three, in this order
 });
 ```
 
@@ -95,7 +95,7 @@ configured key are dropped, and it falls back to the instance's default order
 if the override ends up empty:
 
 ```js
-await cascade.generate({ system, user, order: ['cerebras', 'groq'] }); // just this call
+await cascade.generate({ system, user, order: ['mistral', 'groq'] }); // just this call
 ```
 
 ## Overriding models, and model fallbacks
@@ -175,10 +175,104 @@ there's no further fallback (there's no way to un-send partial output).
 Stopping the loop early (`break`) or letting it throw always releases the
 underlying stream reader — nothing is left dangling.
 
+## Sampling, cancelling and result details
+
+```js
+const controller = new AbortController();
+const r = await cascade.generate({
+  system, user,
+  temperature: 0, topP: 1, stop: ['END'], seed: 7, // seed is best effort
+  signal: controller.signal, // rejects with code ABORTED; penalises no provider
+});
+r.model;        // the model that answered
+r.finishReason; // 'stop', 'length' (cut off by maxTokens), 'content_filter', ...
+```
+
+Check `finishReason` if a cut-off answer would matter to you: it still counts as
+a success. For streams, read `result.model` straight away and `result.info` after
+the stream ends. `info.usage` stays undefined for providers that don't report
+usage in a stream.
+
+Pass `sticky: true` to the constructor to try the provider that last succeeded
+first, so a conversation stays on one provider while it keeps working.
+
+## Recovering when a stream dies
+
+Once text has been sent, a failed stream normally rejects, because the caller
+already holds part of an answer. Pass `onRestart` to try the rest of the chain
+instead. It's called before the new provider's text arrives, so you can discard
+the partial answer. The new answer starts from the beginning.
+
+```js
+let answer = '';
+const result = await cascade.generate({
+  system, user, stream: true,
+  onRestart: ({ from, to, error }) => { answer = ''; },
+});
+for await (const chunk of result.stream) answer += chunk;
+result.provider; // whichever provider finished it
+```
+
+`serve` doesn't use this, because bytes already sent to a client can't be taken back.
+
+## Prompts too big for a provider
+
+A provider that rejects a prompt as too long is remembered for an hour: prompts
+of that size or larger skip it without a request, and smaller ones still try it.
+If you know a limit, set it to avoid the first failed request:
+
+```js
+new LLMCascade({ keys: { ... }, contextTokens: { cloudflare: 8000 } });
+```
+
+Prompt size is a rough estimate (characters / 4), which can undercount non-Latin
+text. If nothing fits, every provider is still tried.
+
+## Keeping cooldowns across restarts
+
+Cooldowns live in memory by default, so a restart forgets them and spends one
+failed request per provider finding out again. To keep provider cooldowns in a
+small file (it holds no keys):
+
+```js
+const { LLMCascade, fileCooldownStore } = require('llm-free-cascade');
+new LLMCascade({ keys: { ... }, cooldownStore: fileCooldownStore('.cascade-cooldowns.json') });
+```
+
+Or set `LLM_CASCADE_COOLDOWN_FILE`, which `fromEnv()` and `serve` both read. Only
+provider-level cooldowns are stored, not per-key or per-model ones, and the last
+provider standing is never cooled. `stats()` also stays in memory.
+
+## Finding free OpenRouter models
+
+The free lineup changes often. This lists it right now, with no key or quota:
+
+```bash
+npx llm-free-cascade free-models
+```
+
+From code, use `discoverFreeModels()`.
+
 ## Provider cooldown
 
-If a provider fails with a structural error (bad model name, no content, any
-HTTP 4xx once every key for it has been tried) it's put on a cooldown
+What happens after a failure depends on its HTTP status first; the error text
+only refines it:
+
+| Failure | What it spends | What happens next |
+|---|---|---|
+| 429, or a quota message | That key + model | Next key, then next model. Rests until the reset (see below). |
+| 401, 403, 402, or a bad-key message | That key | Next key. |
+| 404, or a retired-model message | That model | Next model. |
+| Other 4xx (prompt too long, unsupported option) | Nothing | Next provider, for this call only. No cooldown. |
+| Gemini safety block | Nothing | Next provider, for this call only. No cooldown. |
+| 5xx, timeout, network error | Nothing at first | Next provider. Two in a row trip the circuit breaker. |
+| Caller aborted (`signal`) | Nothing | The call rejects with `ABORTED`. |
+
+The breaker benches a provider for `breakerMs`, doubling each time it trips
+again without a success in between, up to 15 minutes.
+
+If a provider fails with a structural error (retired model, no content, or
+every key rejected) it's put on a cooldown
 (default 10 minutes, configurable via `cooldownMs`) so a busy loop doesn't
 hammer a broken provider on every call. The last provider still standing is
 never cooled down — there'd be nothing left to try.
@@ -269,7 +363,7 @@ A fast provider can be given a shorter leash than a slow one with
 `providerTimeoutMs` (a `timeoutMs` passed to `generate()` still wins):
 
 ```js
-const cascade = new LLMCascade({ keys: { ... }, providerTimeoutMs: { groq: 10_000, cerebras: 10_000 } });
+const cascade = new LLMCascade({ keys: { ... }, providerTimeoutMs: { groq: 10_000, mistral: 10_000 } });
 ```
 
 Per-attempt timeouts still let a bad day add up (15 providers × 30s). To
@@ -441,7 +535,7 @@ of a free one.
 
 From a checkout, `npm run check:providers` asks each provider's model-list
 endpoint (no tokens, no quota) whether the default and fallback models still
-exist. OpenRouter, ModelScope, OVHcloud, LLM7 and Pollinations list models
+exist. OpenRouter, ModelScope, OVHcloud and Pollinations list models
 without a key; for the others it uses the key from your environment.
 
 ## Custom providers and gateways
@@ -496,7 +590,7 @@ const cascade = new LLMCascade({
     ollama: {
       baseUrl: 'http://localhost:11434/v1',
       models: ['llama3.2', 'qwen2.5'], // tried in order, like any model list
-      apiKey: 'ollama',
+      keyless: true,
       tier: 5,
     },
   },
@@ -618,7 +712,6 @@ The default order is the file's order, sorted by **tier** (1 = fast and roomy,
 |---|---|---|---|
 | 1 | Groq | `GROQ_API_KEY` | console.groq.com. Per model: 30 RPM, 1K req/day, 200K tokens/day, per organization |
 | 1 | Google Gemini | `GEMINI_API_KEY` | aistudio.google.com. Per project and per model, daily reset at midnight Pacific; free prompts may train Google's models |
-| 1 | Cerebras | `CEREBRAS_API_KEY` | inference.cerebras.ai. Now a **$5 trial that expires in 30 days** |
 | 2 | Mistral | `MISTRAL_API_KEY` | console.mistral.ai. ~1 req/s, big monthly pool; phone + data-training opt-in |
 | 2 | NVIDIA NIM | `NVIDIA_API_KEY` | build.nvidia.com. ~40 RPM, prototyping only |
 | 2 | Z.ai (Zhipu) | `ZHIPU_API_KEY` | z.ai. GLM-4.7-Flash / 4.5-Flash free, no expiry |
@@ -626,14 +719,10 @@ The default order is the file's order, sorted by **tier** (1 = fast and roomy,
 | 3 | SiliconFlow | `SILICONFLOW_API_KEY` | siliconflow.com. A few small models free; China-hosted |
 | 3 | ModelScope | `MODELSCOPE_API_KEY` | modelscope.cn. ~2,000 req/day; China-hosted, may need a phone |
 | 3 | Cloudflare Workers AI | `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | dash.cloudflare.com. 10K neurons/day, small context |
-| 3 | Hugging Face | `HUGGINGFACE_API_KEY` | huggingface.co/settings/tokens. Only ~$0.10/month now |
 | 3 | Cohere | `COHERE_API_KEY` | dashboard.cohere.com/api-keys. **Non-commercial only** |
-| 4 | Together AI | `TOGETHER_API_KEY` | api.together.xyz. Signup credit only |
-| 4 | SambaNova | `SAMBANOVA_API_KEY` | cloud.sambanova.ai. Trial; payment method now required |
 | 4 | Pollinations | `POLLINATIONS_API_KEY` | auth.pollinations.ai. Anonymous at 1 req/15s, but the cascade only includes a provider it has a key for |
 | 4 | OpenCode Zen | `OPENCODE_API_KEY` | opencode.ai/zen |
 | 4 | OVHcloud AI Endpoints | `OVH_AI_ENDPOINTS_API_KEY` | endpoints.ai.cloud.ovh.net. EU-hosted, ~12 RPM |
-| 4 | LLM7 | `LLM7_API_KEY` | token.llm7.io. Free tier **unverified** (its model list shows prices) |
 | 5 | DeepSeek (paid) | `DEEPSEEK_API_KEY` | platform.deepseek.com. Cheapest sensible paid fallback |
 | 5 | Anthropic (paid) | `ANTHROPIC_API_KEY` | console.anthropic.com |
 

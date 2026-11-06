@@ -69,7 +69,7 @@ const { text, provider, attempts } = await cascade.generate({
 <div class="chain" aria-label="Example chain">
   <span class="node fail">groq (429, rests 58s)</span><i>→</i>
   <span class="node fail">gemini (daily quota, rests until reset)</span><i>→</i>
-  <span class="node ok">cerebras answers</span>
+  <span class="node ok">gemini answers</span>
 </div>
 </section>
 
@@ -108,7 +108,7 @@ client.chat.completions.create(model="cascade", messages=[{"role": "user", "cont
 <p>Or set <code>LLM_CUSTOM_PROVIDERS</code> to the same object as JSON, which also works with <code>serve</code>. <a href="https://github.com/rcgiri-physics/llm-free-cascade/blob/master/docs/GUIDE.md#local-models-ollama">Details</a>.</p>
 
 <h2>Providers</h2>
-<p>Generated from <code>src/providers.json</code> (version 0.10.0). Free tiers change without notice; read each provider's own console and terms before relying on a number here. Entries marked <em>tracker</em> or <em>unverified</em> come from third-party lists, not the provider's docs.</p>
+<p>Generated from <code>src/providers.json</code> (version 0.11.0). Free tiers change without notice; read each provider's own console and terms before relying on a number here. Entries marked <em>tracker</em> or <em>unverified</em> come from third-party lists, not the provider's docs.</p>
 <div class="tools">
   <input type="search" id="q" placeholder="Filter providers, models, notes" aria-label="Filter providers">
 </div>
@@ -130,13 +130,6 @@ client.chat.completions.create(model="cascade", messages=[{"role": "user", "cont
   <td data-label="Models"><code>gemini-3.6-flash</code></td>
   <td data-label="Free tier">per model, per project<div class="notes">limits are per Google Cloud project (not per key) and per model; Google no longer publishes a table, see AI Studio&#39;s rate-limit page; daily quota resets at midnight Pacific; free-tier prompts may be used to improve Google products</div><div class="flags"><span class="tag warn">trains on prompts</span></div></td>
   <td data-label="Sign up"><a href="https://aistudio.google.com" rel="noopener">aistudio.google.com</a><div class="notes">checked 2026-10-07</div></td>
-</tr>
-<tr data-tier="1">
-  <td data-label="Tier"><span class="tier t1">1</span></td>
-  <td data-label="Provider"><strong>cerebras</strong><br><code>CEREBRAS_API_KEY</code></td>
-  <td data-label="Models"><code>gpt-oss-120b</code><br><code>qwen-3.8-27b</code></td>
-  <td data-label="Free tier">5 RPM, 1,000,000 tokens/day · per model, per account<div class="notes">now a free TRIAL: $5 credit that expires 30 days after it is granted (card may be required); 5 RPM, 1M tokens/day per model while it lasts</div><div class="flags"><span class="tag warn">trial</span><span class="tag warn">card</span></div></td>
-  <td data-label="Sign up"><a href="https://inference.cerebras.ai" rel="noopener">inference.cerebras.ai</a><div class="notes">checked 2026-10-07</div></td>
 </tr>
 <tr data-tier="2">
   <td data-label="Tier"><span class="tier t2">2</span></td>
@@ -162,7 +155,7 @@ client.chat.completions.create(model="cascade", messages=[{"role": "user", "cont
 <tr data-tier="3">
   <td data-label="Tier"><span class="tier t3">3</span></td>
   <td data-label="Provider"><strong>openrouter</strong><br><code>OPENROUTER_API_KEY</code></td>
-  <td data-label="Models"><code>nvidia/nemotron-3-super-120b-a12b:free</code><br><code>openrouter/free</code><br><code>google/gemma-4-31b-it:free</code><br><code>google/gemma-4-26b-a4b-it:free</code></td>
+  <td data-label="Models"><code>openrouter/free</code><br><code>google/gemma-4-31b-it:free</code><br><code>google/gemma-4-26b-a4b-it:free</code></td>
   <td data-label="Free tier">20 RPM, 50 req/day · per global<div class="notes">gateway; &#39;:free&#39; models: 20 RPM and 50 requests/day (1,000/day once you have bought $10+ credit), enforced globally per user: extra accounts or keys do NOT raise it. The free lineup churns, &#39;openrouter/free&#39; picks one for you</div><div class="flags"></div></td>
   <td data-label="Sign up"><a href="https://openrouter.ai" rel="noopener">openrouter.ai</a><div class="notes">checked 2026-10-07</div></td>
 </tr>
@@ -189,31 +182,10 @@ client.chat.completions.create(model="cascade", messages=[{"role": "user", "cont
 </tr>
 <tr data-tier="3">
   <td data-label="Tier"><span class="tier t3">3</span></td>
-  <td data-label="Provider"><strong>huggingface</strong><br><code>HUGGINGFACE_API_KEY</code></td>
-  <td data-label="Models"><code>meta-llama/Llama-3.1-8B-Instruct</code></td>
-  <td data-label="Free tier">per account<div class="notes">only about $0.10/month of free inference credit now; backend varies by model</div><div class="flags"><span class="tag note">limits: tracker</span></div></td>
-  <td data-label="Sign up"><a href="https://huggingface.co/settings/tokens" rel="noopener">huggingface.co</a><div class="notes">checked 2026-10-07</div></td>
-</tr>
-<tr data-tier="3">
-  <td data-label="Tier"><span class="tier t3">3</span></td>
   <td data-label="Provider"><strong>cohere</strong><br><code>COHERE_API_KEY</code></td>
   <td data-label="Models"><code>command-r7b-12-2024</code></td>
   <td data-label="Free tier">20 RPM · per account<div class="notes">trial key: ~20 RPM and ~1,000 requests/month; NON-COMMERCIAL use only, do not use for a production product</div><div class="flags"><span class="tag bad">non-commercial</span><span class="tag note">limits: tracker</span></div></td>
   <td data-label="Sign up"><a href="https://dashboard.cohere.com/api-keys" rel="noopener">dashboard.cohere.com</a><div class="notes">checked 2026-10-07</div></td>
-</tr>
-<tr data-tier="4">
-  <td data-label="Tier"><span class="tier t4">4</span></td>
-  <td data-label="Provider"><strong>together</strong><br><code>TOGETHER_API_KEY</code></td>
-  <td data-label="Models"><code>meta-llama/Llama-3.3-70B-Instruct-Turbo</code></td>
-  <td data-label="Free tier">—<div class="notes">signup credit only (not a standing free tier)</div><div class="flags"><span class="tag warn">trial</span><span class="tag note">limits: unverified</span></div></td>
-  <td data-label="Sign up"><a href="https://api.together.xyz" rel="noopener">api.together.xyz</a><div class="notes">checked ?</div></td>
-</tr>
-<tr data-tier="4">
-  <td data-label="Tier"><span class="tier t4">4</span></td>
-  <td data-label="Provider"><strong>sambanova</strong><br><code>SAMBANOVA_API_KEY</code></td>
-  <td data-label="Models"><code>Meta-Llama-3.3-70B-Instruct</code></td>
-  <td data-label="Free tier">20 RPM, 200,000 tokens/day · per account<div class="notes">tightened in 2026: trial credit, and a payment method is now reportedly required; ~20 RPM / 200K tokens/day on trial models</div><div class="flags"><span class="tag warn">trial</span><span class="tag warn">card</span><span class="tag note">limits: tracker</span></div></td>
-  <td data-label="Sign up"><a href="https://cloud.sambanova.ai" rel="noopener">cloud.sambanova.ai</a><div class="notes">checked 2026-10-07</div></td>
 </tr>
 <tr data-tier="4">
   <td data-label="Tier"><span class="tier t4">4</span></td>
@@ -235,13 +207,6 @@ client.chat.completions.create(model="cascade", messages=[{"role": "user", "cont
   <td data-label="Models"><code>Meta-Llama-3_3-70B-Instruct</code></td>
   <td data-label="Free tier">12 RPM · per ip<div class="notes">EU-hosted open models; the API works without a key at a low rate (~12 RPM) but the cascade only uses providers it has a key for, so create a free account for a key. Model catalogue rotates</div><div class="flags"><span class="tag note">limits: tracker</span></div></td>
   <td data-label="Sign up"><a href="https://endpoints.ai.cloud.ovh.net" rel="noopener">endpoints.ai.cloud.ovh.net</a><div class="notes">checked 2026-10-07</div></td>
-</tr>
-<tr data-tier="4">
-  <td data-label="Tier"><span class="tier t4">4</span></td>
-  <td data-label="Provider"><strong>llm7</strong><br><code>LLM7_API_KEY</code></td>
-  <td data-label="Models"><code>gpt-oss:20b</code><br><code>gemma4:31b</code><br><code>nemotron-3-nano:30b</code></td>
-  <td data-label="Free tier">30 RPM · per account<div class="notes">UNVERIFIED free tier: a tracker says ~30 RPM with a free token, but the live model list shows per-token prices and &#39;turbo&#39;/&#39;pro&#39; tiers. The three default models are the &#39;turbo&#39; tier. Check what your token is allowed to use before relying on it</div><div class="flags"><span class="tag note">limits: unverified</span></div></td>
-  <td data-label="Sign up"><a href="https://token.llm7.io" rel="noopener">token.llm7.io</a><div class="notes">checked 2026-10-07</div></td>
 </tr>
 <tr data-tier="5">
   <td data-label="Tier"><span class="tier t5">5</span></td>
@@ -268,7 +233,7 @@ npx llm-free-cascade probe --watch 300   # live check of every key, every 5 minu
 npx llm-free-cascade serve           # OpenAI-compatible endpoint on 127.0.0.1:8787</code></pre>
 
 <footer>
-  MIT licensed. Rotating across providers and models you already have keys for is the intended use; many providers forbid opening several free accounts to get around a limit, so read their terms. Generated 2026-10-14.
+  MIT licensed. Rotating across providers and models you already have keys for is the intended use; many providers forbid opening several free accounts to get around a limit, so read their terms. Generated 2026-11-06.
 </footer>
 </div>
 <script>

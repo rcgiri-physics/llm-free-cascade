@@ -25,7 +25,7 @@ environment, except for the few that list models publicly).
    key, ideally with their own rate-limit bucket; `[]` if unknown), `tier`
    (1 fast and roomy … 5 paid; **keep the file sorted by tier**, the default
    order is the file order), `envVar`, a `signupUrl`, and `freeTierNotes`. That's
-   it — no code changes, `callProviderWithKey` in [`src/index.js`](src/index.js)
+   it — no code changes, `callProviderWithKey` in [`src/transport.js`](src/transport.js)
    dispatches on `apiStyle` automatically.
 2. Record what you know about the limits, honestly: `limits` (`rpm`, `rpd`,
    `tpm`, `tpd`, `perModel`, `scope`), `limitsSource` (`official` only if you read
