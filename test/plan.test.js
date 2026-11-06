@@ -462,7 +462,7 @@ test('probe(): one tiny request per configured key, reporting who answered and w
   assert.deepEqual(results.map((r) => [r.provider, r.keyIndex, r.ok, r.status]), [['groq', 0, true, 200], ['groq', 1, false, 401]]);
   assert.ok(!JSON.stringify(results).includes('bad-key-123'), 'the key must be redacted from the report');
   assert.deepEqual(cooled, [], 'probing never changes cooldowns');
-  assert.equal(calls[0].body.max_tokens, 32);
+  assert.equal(calls[0].body.max_tokens, 256);
 });
 
 test('clearCooldown also forgets per-key and per-model cooldowns', async (t) => {
