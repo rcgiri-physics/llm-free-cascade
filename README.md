@@ -90,9 +90,10 @@ r = client.chat.completions.create(model="cascade", messages=[{"role": "user", "
 ```
 
 `model: "cascade"` uses the whole chain; a provider name (`"groq"`) pins one.
-Supported: text messages, `stream: true`, `max_tokens`,
-`response_format: json_object`, `GET /v1/models`. Tool calls, images and
-`n > 1` return a clear 400 rather than being ignored.
+Supported: text messages, `stream: true`, `max_tokens`, `temperature`, `top_p`,
+`stop`, `seed`, `response_format: json_object`, `GET /v1/models`. Tool calls,
+images, `n > 1` and non-default penalties return a clear 400 rather than being
+ignored.
 
 Safe by default: it listens on 127.0.0.1 only and rejects other Host headers
 and non-JSON requests from web pages. To listen on another address
@@ -138,7 +139,7 @@ new LLMCascade({
     ollama: {
       baseUrl: 'http://localhost:11434/v1',
       model: 'llama3.2',
-      apiKey: 'ollama', // any non-empty value; a custom provider without a key is skipped
+      keyless: true,
       tier: 5,          // after every free cloud provider
     },
   },
@@ -147,7 +148,7 @@ new LLMCascade({
 ```
 
 Or without code (also works with `serve`):
-`LLM_CUSTOM_PROVIDERS='{"ollama":{"baseUrl":"http://localhost:11434/v1","model":"llama3.2","apiKey":"ollama","tier":5}}'`.
+`LLM_CUSTOM_PROVIDERS='{"ollama":{"baseUrl":"http://localhost:11434/v1","model":"llama3.2","keyless":true,"tier":5}}'`.
 See the [guide](docs/GUIDE.md#local-models-ollama) for details.
 
 When every provider fails, `generate()` rejects with an `LLMCascadeError`
@@ -168,6 +169,15 @@ records `verifiedAt` and where its numbers came from. Read a provider's own
 terms before relying on it, and before opening several free accounts to get
 around a limit: many providers forbid that. Rotating across providers and
 models you already have keys for is the intended use.
+
+## How it compares
+
+[LiteLLM](https://github.com/BerriAI/litellm), [Portkey](https://github.com/Portkey-AI/gateway)
+and [OmniRoute](https://github.com/cheaper-inference/OmniRoute) are much larger
+gateways with dashboards and far more providers, and are the better choice if
+you need those. This package is a small zero-dependency library you call in
+process, with an optional local server, for stacking free tiers you already
+have keys for.
 
 ## Documentation
 

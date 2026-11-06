@@ -175,10 +175,47 @@ there's no further fallback (there's no way to un-send partial output).
 Stopping the loop early (`break`) or letting it throw always releases the
 underlying stream reader — nothing is left dangling.
 
+## Sampling, cancelling and result details
+
+```js
+const controller = new AbortController();
+const r = await cascade.generate({
+  system, user,
+  temperature: 0, topP: 1, stop: ['END'], seed: 7, // seed is best effort
+  signal: controller.signal, // rejects with code ABORTED; penalises no provider
+});
+r.model;        // the model that answered
+r.finishReason; // 'stop', 'length' (cut off by maxTokens), 'content_filter', ...
+```
+
+Check `finishReason` if a cut-off answer would matter to you: it still counts as
+a success. For streams, read `result.model` straight away and `result.info` after
+the stream ends. `info.usage` stays undefined for providers that don't report
+usage in a stream.
+
+Pass `sticky: true` to the constructor to try the provider that last succeeded
+first, so a conversation stays on one provider while it keeps working.
+
 ## Provider cooldown
 
-If a provider fails with a structural error (bad model name, no content, any
-HTTP 4xx once every key for it has been tried) it's put on a cooldown
+What happens after a failure depends on its HTTP status first; the error text
+only refines it:
+
+| Failure | What it spends | What happens next |
+|---|---|---|
+| 429, or a quota message | That key + model | Next key, then next model. Rests until the reset (see below). |
+| 401, 403, 402, or a bad-key message | That key | Next key. |
+| 404, or a retired-model message | That model | Next model. |
+| Other 4xx (prompt too long, unsupported option) | Nothing | Next provider, for this call only. No cooldown. |
+| Gemini safety block | Nothing | Next provider, for this call only. No cooldown. |
+| 5xx, timeout, network error | Nothing at first | Next provider. Two in a row trip the circuit breaker. |
+| Caller aborted (`signal`) | Nothing | The call rejects with `ABORTED`. |
+
+The breaker benches a provider for `breakerMs`, doubling each time it trips
+again without a success in between, up to 15 minutes.
+
+If a provider fails with a structural error (retired model, no content, or
+every key rejected) it's put on a cooldown
 (default 10 minutes, configurable via `cooldownMs`) so a busy loop doesn't
 hammer a broken provider on every call. The last provider still standing is
 never cooled down — there'd be nothing left to try.
@@ -496,7 +533,7 @@ const cascade = new LLMCascade({
     ollama: {
       baseUrl: 'http://localhost:11434/v1',
       models: ['llama3.2', 'qwen2.5'], // tried in order, like any model list
-      apiKey: 'ollama',
+      keyless: true,
       tier: 5,
     },
   },

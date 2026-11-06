@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.11.0
+
+### Changed
+- **Failures are classified by HTTP status first**, then by error text. A 400,
+  413 or 422 about one request now skips the provider for that call instead of
+  benching it for `cooldownMs`. A 5xx is never read as a rate limit because of
+  digits in its text. A 402 moves on to the next key.
+- A Gemini safety block no longer benches Gemini.
+- Circuit-breaker cooldowns double each time the breaker trips again without a
+  success in between, up to 15 minutes.
+- Requests no longer follow redirects, so keys in custom headers can't reach
+  another host.
+- `serve`: the response `model` is now the model that answered (the provider is
+  in the `x-llm-provider` header), `finish_reason` is the provider's real one,
+  and non-default `presence_penalty`, `frequency_penalty`, `logprobs` and
+  `logit_bias` return a 400 instead of being ignored.
+- OpenRouter's default model is now `openrouter/free`; the previous default was
+  retired.
+
+### Added
+- `temperature`, `topP`, `stop` and `seed` in `generate()`, also accepted by `serve`.
+- `signal` in `generate()`. An aborted call rejects with code `ABORTED` and no
+  provider is penalised. `serve` uses it when a client disconnects.
+- `model` and `finishReason` in results. Streams report them through `model` and
+  `info`, which also holds `usage` when the provider sends it in a stream.
+- `sticky` option: try the provider that last succeeded first.
+- `keyless` option for custom providers, for Ollama and the like.
+
+### Fixed
+- SSE: CRLF line endings, a final event with no blank line, and a large chunk
+  holding many events being mistaken for one oversized event.
+- An error event inside a stream was ignored, so a cut-off answer looked complete.
+- A failing `cooldownStore` rejected the whole call. It now falls back to a
+  local cooldown.
+- `deadlineMs` could be overrun by the key and model attempts inside one provider.
+- Array-style message content crashed the response parser.
+- Error messages in the `{"error":"text"}`, `detail`, `errors[]` and plain-text
+  shapes were lost.
+- An omitted `system` sent a system message with no content.
+- `serve`: dropped `temperature`, `top_p`, `stop` and `seed` without saying so, had
+  no limit on how long a client could take to send a request, ignored
+  backpressure, and returned a 500 for a malformed URL.
+- Redaction now covers common key shapes and custom header values.
+
 ## 0.10.0
 
 ### Added
