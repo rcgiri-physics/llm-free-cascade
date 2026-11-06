@@ -19,6 +19,7 @@
 // a new free-tier provider only needs to touch this JSON file, not the
 // dispatch logic below. See CONTRIBUTING.md.
 const PROVIDERS_META = require('./providers.json');
+const { fileCooldownStore, discoverFreeModels } = require('./extras.js');
 
 const ANTHROPIC_VERSION = '2023-06-01';
 
@@ -58,6 +59,8 @@ const BREAKER_THRESHOLD = 2;
 const DEFAULT_BREAKER_MS = 60 * 1000;
 const MAX_BREAKER_MS = 15 * 60 * 1000;
 const LATENCY_SAMPLES = 50;
+// A context-length error is only trusted this long: limits and models change.
+const LEARNED_CONTEXT_MS = 60 * 60 * 1000;
 // Sent as the bearer token by a `keyless` custom provider (Ollama and the like ignore it).
 const NO_KEY = 'no-key-required';
 const CUSTOM_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
@@ -865,6 +868,7 @@ function buildMeta(options) {
       tier: Number.isFinite(c.tier) ? c.tier : 3,
       headers,
       dayReset: typeof c.dayReset === 'string' ? c.dayReset : undefined,
+      contextTokens: Number.isFinite(c.contextTokens) && c.contextTokens > 0 ? c.contextTokens : undefined,
       signupUrl: null,
       freeTierNotes: 'custom provider',
       custom: true,
@@ -893,6 +897,7 @@ function buildMeta(options) {
  * @property {number} [breakerMs=60000] - circuit breaker: after 2 consecutive timeouts/network errors/5xx from a provider, skip it for this long instead of paying the timeout on every call. 0 disables.
  * @property {Object<string,number>} [providerTimeoutMs] - per-provider default timeout (e.g. `{ groq: 10000 }` so a fast provider fails fast). A `timeoutMs` passed to `generate()` still wins.
  * @property {boolean} [adaptiveOrder=false] - within each run of same-tier providers, reorder by observed latency and success rate once there are enough samples. Providers with too few samples keep their place.
+ * @property {Object<string,number>} [contextTokens] - provider -> context window in tokens. A provider the prompt plus `maxTokens` would not fit in is skipped without a request, unless nothing fits. The prompt size is a rough estimate (characters / 4).
  * @property {boolean} [sticky=false] - try the provider that last succeeded first, so a conversation stays on one provider while it keeps working.
  * @property {number} [deadlineMs] - total time budget for one `generate()` call across every provider it tries. Without it, the worst case is `timeoutMs` × (number of providers). Exceeding it throws an LLMCascadeError with code `DEADLINE_EXCEEDED`.
  * @property {number} [maxTokensLimit] - hard ceiling applied to every call's `maxTokens`, so a caller-supplied value can never exceed it (cost control when `maxTokens` comes from an untrusted request).
@@ -929,6 +934,8 @@ class LLMCascade {
     this.breakerMs = options.breakerMs ?? DEFAULT_BREAKER_MS;
     this.providerTimeoutMs = options.providerTimeoutMs || {};
     this.adaptiveOrder = Boolean(options.adaptiveOrder);
+    this.contextTokens = options.contextTokens || {};
+    this._learnedContext = new Map();
     this.sticky = Boolean(options.sticky);
     this._lastGood = null;
     this.deadlineMs = options.deadlineMs;
@@ -1013,6 +1020,7 @@ class LLMCascade {
       const url = String(process.env[`${provider.toUpperCase()}_BASE_URL`] || '').trim();
       if (url) baseUrls[provider] = url;
     }
+    const cooldownFile = String(process.env.LLM_CASCADE_COOLDOWN_FILE || '').trim();
     let custom = {};
     const rawCustom = String(process.env.LLM_CUSTOM_PROVIDERS || '').trim();
     if (rawCustom) {
@@ -1025,6 +1033,7 @@ class LLMCascade {
     const override = (process.env.LLM_PROVIDER_ORDER || '').trim().toLowerCase();
     const order = override ? override.split(',').map((s) => s.trim()) : undefined;
     return new LLMCascade({
+      ...(cooldownFile ? { cooldownStore: fileCooldownStore(cooldownFile) } : {}),
       ...options,
       keys: { ...keys, ...(options.keys || {}) },
       baseUrls: { ...baseUrls, ...(options.baseUrls || {}) },
@@ -1494,10 +1503,10 @@ class LLMCascade {
    * *before* the winner, for callers who want to see/log the fallback path
    * without wrapping `generate()` themselves.
    */
-  async _runCascade(chain, attempt, timeoutFor, signal) {
+  async _runCascade(chain, attempt, timeoutFor, signal, { deadlineAt, promptTokens } = {}) {
     const failures = [];
     const hasDeadline = Number.isFinite(this.deadlineMs) && this.deadlineMs > 0;
-    const deadline = hasDeadline ? Date.now() + this.deadlineMs : Infinity;
+    const deadline = deadlineAt ?? (hasDeadline ? Date.now() + this.deadlineMs : Infinity);
     // Shrinks as providers are cooled down during this call, so the last one
     // standing is never cooled (there'd be nothing left for the next call).
     let stillLive = chain;
@@ -1522,6 +1531,7 @@ class LLMCascade {
         if (signal?.aborted) throw aborted();
         const message = this._redact(err.message);
         failures.push({ provider, message });
+        if (err.requestSpecific && promptTokens && CONTEXT_RE.test(err.message)) this._learnContext(provider, promptTokens);
         if (typeof this.onProviderFailure === 'function') {
           try { this.onProviderFailure(provider, message); } catch { /* observability hook — never break the cascade */ }
         }
@@ -1555,6 +1565,56 @@ class LLMCascade {
     );
   }
 
+  _learnContext(provider, promptTokens) {
+    const known = this._learnedContext.get(provider);
+    const stale = !known || Date.now() - known.at > LEARNED_CONTEXT_MS;
+    this._learnedContext.set(provider, { tokens: stale ? promptTokens : Math.min(known.tokens, promptTokens), at: Date.now() });
+  }
+
+  /** Drops providers this prompt can't fit. If that would drop all of them, keeps the chain as it was. */
+  _fitContext(chain, promptTokens, maxTokens) {
+    const fits = (provider) => {
+      const own = Object.hasOwn(this.contextTokens, provider) ? this.contextTokens[provider] : this._meta[provider]?.contextTokens;
+      if (Number.isFinite(own) && own > 0 && promptTokens + maxTokens > own) return false;
+      const learned = this._learnedContext.get(provider);
+      return !(learned && Date.now() - learned.at <= LEARNED_CONTEXT_MS && promptTokens >= learned.tokens);
+    };
+    const fitted = chain.filter(fits);
+    return fitted.length ? fitted : chain;
+  }
+
+  /** Wraps a stream so that a failure after text was sent moves on to the rest of the chain, telling the caller through `onRestart`. */
+  _withRestart(first, chain, run, { onRestart, signal }) {
+    const self = this;
+    const result = { ...first };
+    let current = first;
+    result.stream = (async function* () {
+      while (true) {
+        try {
+          yield* current.stream;
+          return;
+        } catch (err) {
+          if (signal?.aborted) throw err;
+          const from = current.provider;
+          const error = self._redact(err.message);
+          result.attempts.push({ provider: from, message: error });
+          if (typeof self.onProviderFailure === 'function') {
+            try { self.onProviderFailure(from, error); } catch { /* observability hook */ }
+          }
+          const rest = chain.slice(chain.indexOf(from) + 1);
+          if (!rest.length) throw err;
+          let next;
+          try { next = await run(rest); } catch { throw err; }
+          try { onRestart({ from, to: next.provider, error }); } catch { /* the caller's hook must not break the stream */ }
+          result.attempts.push(...next.attempts);
+          Object.assign(result, { provider: next.provider, model: next.model, info: next.info });
+          current = next;
+        }
+      }
+    })();
+    return result;
+  }
+
   /**
    * Run a chat completion across the provider chain until one succeeds.
    * @param {Object} params
@@ -1568,11 +1628,13 @@ class LLMCascade {
    * @param {number} [params.timeoutMs] - per-attempt fetch timeout override for this call (also beats `providerTimeoutMs`)
    * @param {string[]} [params.order] - override the provider chain for just this call (providers without a configured key are dropped; falls back to the instance's default order if empty/omitted).
    * @param {boolean} [params.stream] - return `{ stream, provider }` (an async iterable of text chunks) instead of `{ text, ... }`. A provider that fails before its first chunk still falls over to the next one; once a chunk has been yielded there's no further fallback.
+   * @param {(event: {from: string, to: string, error: string}) => void} [params.onRestart] - streams only: if a stream fails after text was sent, try the rest of the chain and call this first, so you can discard the partial answer. Without it, the failure rejects the stream.
    * @returns {Promise<{text: string, parsed: any, provider: string, usage: ({promptTokens: number, completionTokens: number, totalTokens: number}|undefined), shadowCostUsd: (number|undefined), attempts: {provider: string, message: string}[]} | {stream: AsyncIterable<string>, provider: string, attempts: {provider: string, message: string}[]}>}
    */
   async generate(params) {
     const messages = normalizeMessages(params);
     if (params.system != null && typeof params.system !== 'string') throw invalidInput('"system" must be a string');
+    if (params.onRestart != null && typeof params.onRestart !== 'function') throw invalidInput('"onRestart" must be a function');
     if (params.signal?.aborted) throw new LLMCascadeError('The call was aborted by the caller.', 499, 'ABORTED');
     const stop = params.stop == null ? undefined : [].concat(params.stop);
     if (stop && (!stop.length || !stop.every((s) => typeof s === 'string' && s))) throw invalidInput('"stop" must be a non-empty string or array of strings');
@@ -1583,8 +1645,8 @@ class LLMCascade {
     const requestedOrder = Array.isArray(params.order) && params.order.length
       ? this._withKeys(params.order)
       : this.order;
-    const chain = await this._liveOrderFor(requestedOrder);
-    if (!chain.length) {
+    const liveChain = await this._liveOrderFor(requestedOrder);
+    if (!liveChain.length) {
       throw new LLMCascadeError(
         `No provider is configured. Pass at least one key in "keys", or set an env var: ${Object.values(PROVIDER_ENV).join(', ')}.`,
         503,
@@ -1609,13 +1671,21 @@ class LLMCascade {
       timeoutMs: callTimeout,
     };
 
+    const promptTokens = Math.ceil(([params.system || '', ...messages.map((m) => m.content)].join('').length) / 4);
+    const chain = this._fitContext(liveChain, promptTokens, opts.maxTokens);
+    const hasDeadline = Number.isFinite(this.deadlineMs) && this.deadlineMs > 0;
+    const budgetInfo = { promptTokens, deadlineAt: hasDeadline ? Date.now() + this.deadlineMs : Infinity };
+
     if (opts.stream) {
-      return this._runCascade(
-        chain,
+      const run = (providers) => this._runCascade(
+        providers,
         (provider, budget) => this._tryProvider(provider, (apiKey, model, attemptTimeoutMs) => this._openStream(provider, { ...opts, attemptTimeoutMs }, apiKey, model), budget),
         timeoutFor,
-        params.signal
+        params.signal,
+        budgetInfo
       );
+      const first = await run(chain);
+      return typeof params.onRestart === 'function' ? this._withRestart(first, chain, run, params) : first;
     }
 
     return this._runCascade(chain, async (provider, budget) => {
@@ -1628,7 +1698,7 @@ class LLMCascade {
         ? (usage.totalTokens / 1e6) * costPerMillionTokens
         : undefined;
       return { text, parsed, provider, model, finishReason, usage, shadowCostUsd };
-    }, timeoutFor, params.signal);
+    }, timeoutFor, params.signal, budgetInfo);
   }
 }
 
@@ -1648,6 +1718,8 @@ module.exports = {
   // app (or the `keys` CLI) can build a "get more free keys" UI without
   // duplicating the data.
   PROVIDER_INFO: PROVIDERS_META,
+  fileCooldownStore,
+  discoverFreeModels,
   // Exposed for tests and for hosts that want to reuse the same parsing.
   _internals: { classifyFailure, parseDurationMs, retryHintFromMessage, rateWindow, msUntilMidnight, validateBaseUrl },
 };

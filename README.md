@@ -70,6 +70,7 @@ llm-free-cascade — 3 provider(s) configured, in this order:
 npx llm-free-cascade probe                  # one tiny live request through every key
 npx llm-free-cascade probe --watch 300      # ...repeated every 5 minutes
 npx llm-free-cascade keys                   # which providers you're missing, and where to sign up
+npx llm-free-cascade free-models            # OpenRouter's free models right now
 ```
 
 ## Use it from any OpenAI client

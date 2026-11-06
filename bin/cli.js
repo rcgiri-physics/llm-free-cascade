@@ -8,6 +8,7 @@
  *   status                           what is configured: order, keys, models, free-tier limits
  *   probe  [--watch N] [--json]      one tiny request per key, to catch dead keys / retired models
  *          [--provider a,b]
+ *   free-models [--json]             OpenRouter's free models right now (needs no key)
  *   serve  [--port 8787] [--host 127.0.0.1]
  *                                    OpenAI-compatible local endpoint (key: LLM_CASCADE_SERVER_KEY)
  *
@@ -24,9 +25,9 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { PROVIDER_INFO, LLMCascade } = require('../src/index.js');
+const { PROVIDER_INFO, LLMCascade, discoverFreeModels } = require('../src/index.js');
 
-const USAGE = 'Usage: llm-free-cascade keys [--open] [--env] | status | probe [--watch N] [--json] [--provider a,b] | serve [--port N] [--host H]';
+const USAGE = 'Usage: llm-free-cascade keys [--open] [--env] | status | probe [--watch N] [--json] [--provider a,b] | free-models [--json] | serve [--port N] [--host H]';
 
 function isConfigured(envVar) {
   if (String(process.env[envVar] || '').trim()) return true;
@@ -233,6 +234,17 @@ llm-free-cascade OpenAI-compatible server on http://${shown}:${port}/v1`);
   });
 }
 
+async function printFreeModels(args) {
+  const models = await discoverFreeModels();
+  if (args.includes('--json')) {
+    console.log(JSON.stringify(models, null, 2));
+    return;
+  }
+  console.log(`OpenRouter free models right now (${models.length}), largest context first:\n`);
+  for (const m of models) console.log(`  ${m.id}  ${m.contextLength ?? '?'}`);
+  console.log('\nUse them with: models: { openrouter: [...] }');
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0] && !args[0].startsWith('--') ? args[0] : 'keys';
@@ -240,6 +252,7 @@ async function main() {
   if (command === 'status') return printStatus();
   if (command === 'probe') return runProbe(args.slice(1));
   if (command === 'serve') return runServe(args.slice(1));
+  if (command === 'free-models') return printFreeModels(args.slice(1));
 
   if (command !== 'keys') {
     console.log(`Unknown command "${command}". ${USAGE}`);

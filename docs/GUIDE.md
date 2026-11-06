@@ -196,6 +196,63 @@ usage in a stream.
 Pass `sticky: true` to the constructor to try the provider that last succeeded
 first, so a conversation stays on one provider while it keeps working.
 
+## Recovering when a stream dies
+
+Once text has been sent, a failed stream normally rejects, because the caller
+already holds part of an answer. Pass `onRestart` to try the rest of the chain
+instead. It's called before the new provider's text arrives, so you can discard
+the partial answer. The new answer starts from the beginning.
+
+```js
+let answer = '';
+const result = await cascade.generate({
+  system, user, stream: true,
+  onRestart: ({ from, to, error }) => { answer = ''; },
+});
+for await (const chunk of result.stream) answer += chunk;
+result.provider; // whichever provider finished it
+```
+
+`serve` doesn't use this, because bytes already sent to a client can't be taken back.
+
+## Prompts too big for a provider
+
+A provider that rejects a prompt as too long is remembered for an hour: prompts
+of that size or larger skip it without a request, and smaller ones still try it.
+If you know a limit, set it to avoid the first failed request:
+
+```js
+new LLMCascade({ keys: { ... }, contextTokens: { cloudflare: 8000 } });
+```
+
+Prompt size is a rough estimate (characters / 4), which can undercount non-Latin
+text. If nothing fits, every provider is still tried.
+
+## Keeping cooldowns across restarts
+
+Cooldowns live in memory by default, so a restart forgets them and spends one
+failed request per provider finding out again. To keep provider cooldowns in a
+small file (it holds no keys):
+
+```js
+const { LLMCascade, fileCooldownStore } = require('llm-free-cascade');
+new LLMCascade({ keys: { ... }, cooldownStore: fileCooldownStore('.cascade-cooldowns.json') });
+```
+
+Or set `LLM_CASCADE_COOLDOWN_FILE`, which `fromEnv()` and `serve` both read. Only
+provider-level cooldowns are stored, not per-key or per-model ones, and the last
+provider standing is never cooled. `stats()` also stays in memory.
+
+## Finding free OpenRouter models
+
+The free lineup changes often. This lists it right now, with no key or quota:
+
+```bash
+npx llm-free-cascade free-models
+```
+
+From code, use `discoverFreeModels()`.
+
 ## Provider cooldown
 
 What happens after a failure depends on its HTTP status first; the error text

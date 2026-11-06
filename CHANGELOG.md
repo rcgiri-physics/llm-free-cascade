@@ -34,6 +34,13 @@
   `info`, which also holds `usage` when the provider sends it in a stream.
 - `sticky` option: try the provider that last succeeded first.
 - `keyless` option for custom providers, for Ollama and the like.
+- `onRestart` for streams: a stream that fails after sending text moves to the
+  rest of the chain, and tells you to discard the partial answer.
+- Context-window routing: `contextTokens`, plus remembering context-length errors
+  for an hour, so prompts that won't fit skip a provider without a request.
+- `fileCooldownStore()` and `LLM_CASCADE_COOLDOWN_FILE`: provider cooldowns that
+  survive a restart.
+- `discoverFreeModels()` and `npx llm-free-cascade free-models`.
 
 ### Fixed
 - SSE: CRLF line endings, a final event with no blank line, and a large chunk

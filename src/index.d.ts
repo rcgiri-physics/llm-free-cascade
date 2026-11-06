@@ -19,6 +19,8 @@ export interface CustomProvider {
   tier?: number;
   /** Extra request headers (Authorization / Content-Type / Host are not allowed). */
   headers?: Record<string, string>;
+  /** Context window in tokens. A prompt that won't fit skips this provider. */
+  contextTokens?: number;
   /** Set for an endpoint that needs no key (Ollama and the like), so it joins the chain without a placeholder `apiKey`. */
   keyless?: boolean;
   /** When a daily limit resets, e.g. `"midnight:America/Los_Angeles"`. Default: re-check hourly. */
@@ -100,6 +102,8 @@ export interface LLMCascadeOptions {
   providerTimeoutMs?: Partial<Record<Provider, number>>;
   /** Within each run of same-tier providers, reorder by observed latency and success rate once there are enough samples. Off by default. */
   adaptiveOrder?: boolean;
+  /** Provider -> context window in tokens. A provider the prompt plus `maxTokens` would not fit in is skipped without a request, unless nothing fits. The prompt size is a rough estimate (characters / 4). */
+  contextTokens?: Partial<Record<Provider, number>>;
   /** Try the provider that last succeeded first, so a conversation stays on one provider while it keeps working. Off by default. */
   sticky?: boolean;
   /** Total time budget for one generate() call across every provider tried. Exceeding it throws `DEADLINE_EXCEEDED`. */
@@ -144,6 +148,8 @@ export interface GenerateParams {
   stop?: string | string[];
   /** Best effort. Not every provider honours it, and Anthropic has no equivalent. */
   seed?: number;
+  /** Streams only: if a stream fails after text was sent, try the rest of the chain and call this first, so you can discard the partial answer. Without it, the failure rejects the stream. */
+  onRestart?: (event: { from: Provider; to: Provider; error: string }) => void;
   /** Abort the call. Rejects with code `ABORTED`; no provider is penalised for it. */
   signal?: AbortSignal;
   /** Gemini only: disables "thinking" (`thinkingBudget: 0`) for deterministic/structured calls. Ignored by every other provider. */
@@ -212,6 +218,15 @@ export class LLMCascade {
   probe(options?: { providers?: Provider[]; timeoutMs?: number; maxTokens?: number }): Promise<ProbeResult[]>;
 }
 
+export interface CooldownStore {
+  get(provider: Provider): number | Promise<number>;
+  set(provider: Provider, until: number): void | Promise<void>;
+  getMany?(providers: Provider[]): number[] | Promise<number[]>;
+}
+/** A cooldownStore in a small JSON file, so provider cooldowns survive a restart. Holds no keys. */
+export function fileCooldownStore(filePath: string): CooldownStore;
+/** OpenRouter's free models right now, largest context window first. Needs no key. */
+export function discoverFreeModels(options?: { timeoutMs?: number }): Promise<{ id: string; name: string; contextLength: number | null }[]>;
 export function parseJsonLoose(text: string): any;
 /** Scrubs credential-looking tokens from a message. Pass `secrets` (literal key values) for deterministic redaction regardless of phrasing. */
 export function redact(message: string, secrets?: string[]): string;
