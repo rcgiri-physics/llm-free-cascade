@@ -64,6 +64,8 @@ const BREAKER_THRESHOLD = 2;
 const DEFAULT_BREAKER_MS = 60 * 1000;
 const MAX_BREAKER_MS = 15 * 60 * 1000;
 const LATENCY_SAMPLES = 50;
+// Reasoning models spend tokens on reasoning before any text, so a very low limit reads as an empty response.
+const PROBE_MAX_TOKENS = 256;
 // A context-length error is only trusted this long: limits and models change.
 const LEARNED_CONTEXT_MS = 60 * 60 * 1000;
 // Sent as the bearer token by a `keyless` custom provider (Ollama and the like ignore it).
@@ -604,7 +606,7 @@ class LLMCascade {
     const opts = {
       system: 'You are a health check. Reply with the single word: ok',
       messages: [{ role: 'user', content: 'ping' }],
-      maxTokens: resolveMaxTokens(options.maxTokens ?? 32, this.maxTokensLimit),
+      maxTokens: resolveMaxTokens(options.maxTokens ?? PROBE_MAX_TOKENS, this.maxTokensLimit),
       noThinking: true,
       timeoutMs,
       attemptTimeoutMs: timeoutMs,

@@ -424,7 +424,10 @@ async function callOpenAICompat(opts) {
   }, attemptTimeoutMs, opts.signal);
 
   const text = contentText(data.choices?.[0]?.message?.content).trim();
-  if (!text) throw new Error(`${provider} returned an empty response`);
+  if (!text) {
+    const finish = data.choices?.[0]?.finish_reason;
+    throw new Error(`${provider} returned an empty response${finish ? ` (finish_reason: ${finish})` : ''}`);
+  }
   return { text, usage: normalizeUsage(data.usage), finishReason: data.choices?.[0]?.finish_reason || undefined };
 }
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.1
+
+### Fixed
+- `probe` sent a limit of 32 tokens, too few for reasoning models such as Groq's
+  `gpt-oss-120b`, so working keys were reported as failing. It now sends 256.
+- An empty response error now includes the provider's finish reason, so a
+  `maxTokens` set too low is easy to recognise.
+
 ## 0.11.0
 
 ### Removed
