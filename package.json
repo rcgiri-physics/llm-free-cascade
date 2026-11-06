@@ -1,6 +1,6 @@
 {
   "name": "llm-free-cascade",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Cascade a chat completion across every free-tier LLM API you have a key for (Groq, Gemini, Mistral, NVIDIA NIM, Z.ai, OpenRouter, SiliconFlow, ModelScope, Cloudflare, Cohere, and more) with per-key and per-model rotation, reset-aware cooldowns, custom/gateway providers, stats, streaming, and a paid last-resort fallback.",
   "main": "src/index.js",
   "types": "src/index.d.ts",

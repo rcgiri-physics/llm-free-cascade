@@ -328,7 +328,7 @@ const MESSAGE_ROLES = new Set(['user', 'assistant']);
 function validateMessages(messages) {
   const out = messages.map((m, i) => {
     if (!m || typeof m !== 'object') throw invalidInput(`messages[${i}] must be an object`);
-    if (!MESSAGE_ROLES.has(m.role)) throw invalidInput(`messages[${i}].role must be "user" or "assistant"`);
+    if (!MESSAGE_ROLES.has(m.role)) throw invalidInput(`messages[${i}].role must be "user" or "assistant''}`);
     if (typeof m.content !== 'string' || !m.content.trim()) throw invalidInput(`messages[${i}].content must be a non-empty string`);
     return { role: m.role, content: m.content };
   });
@@ -424,7 +424,10 @@ async function callOpenAICompat(opts) {
   }, attemptTimeoutMs, opts.signal);
 
   const text = contentText(data.choices?.[0]?.message?.content).trim();
-  if (!text) throw new Error(`${provider} returned an empty response`);
+  if (!text) {
+    const finish = data.choices?.[0]?.finish_reason;
+    throw new Error(`${provider} returned an empty response${finish ? ` (finish_reason: ${finish})` : ''}`);
+  }
   return { text, usage: normalizeUsage(data.usage), finishReason: data.choices?.[0]?.finish_reason || undefined };
 }
 
@@ -487,7 +490,7 @@ function callProviderWithKey(provider, meta, opts, apiKey, model) {
     return callOpenAICompat({ ...opts, baseUrl: target.baseUrl, model, apiKey, provider, extraHeaders: target.extraHeaders });
   }
 
-  return Promise.reject(new Error(`${provider}: unknown apiStyle "${meta.apiStyle}"`));
+  return Promise.reject(new Error(`${provider}: unknown apiStyle "${meta.apiStyle}''}`));
 }
 
 const streamTimeouts = (opts) => ({ firstByteMs: opts.attemptTimeoutMs ?? opts.timeoutMs, idleMs: opts.timeoutMs, signal: opts.signal });
@@ -584,7 +587,7 @@ function streamProviderWithKey(provider, meta, opts, apiKey, model) {
     return streamOpenAICompat({ ...opts, baseUrl, model, apiKey, provider, extraHeaders });
   }
 
-  throw new Error(`${provider}: unknown apiStyle "${meta.apiStyle}"`);
+  throw new Error(`${provider}: unknown apiStyle "${meta.apiStyle}''}`);
 }
 
 module.exports = {

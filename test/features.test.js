@@ -167,3 +167,11 @@ test('a context-length error is remembered for prompts of that size or larger', 
   await c.generate({ ...G, user: 'short' });
   assert.equal(hits.some((u) => u.includes('groq')), true, 'a smaller prompt still tries it');
 });
+
+test('probe allows room for reasoning models, and empty responses give the finish reason', async () => {
+  let sent;
+  global.fetch = async (u, o) => { sent = JSON.parse(o.body).max_tokens; return json({ choices: [{ message: { content: '' }, finish_reason: 'length' }] }); };
+  const [result] = await new LLMCascade({ keys: { groq: 'a' } }).probe();
+  assert.equal(sent, 256);
+  assert.match(result.message, /empty response (finish_reason: length)/);
+});
