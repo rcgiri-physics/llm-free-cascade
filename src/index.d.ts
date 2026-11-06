@@ -1,7 +1,7 @@
 export type BuiltinProvider =
-  | 'groq' | 'gemini' | 'cerebras' | 'mistral' | 'nvidia' | 'zhipu'
-  | 'openrouter' | 'siliconflow' | 'modelscope' | 'cloudflare' | 'huggingface' | 'cohere'
-  | 'together' | 'sambanova' | 'pollinations' | 'opencode' | 'ovh' | 'llm7'
+  | 'groq' | 'gemini' | 'mistral' | 'nvidia' | 'zhipu'
+  | 'openrouter' | 'siliconflow' | 'modelscope' | 'cloudflare' | 'cohere'
+  | 'pollinations' | 'opencode' | 'ovh'
   | 'deepseek' | 'anthropic';
 
 /** A built-in provider, or the name of a `custom` provider you registered. */

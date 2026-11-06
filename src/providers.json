@@ -28,21 +28,6 @@
     "costPerMillionTokens": 0.5,
     "verifiedAt": "2026-10-07"
   },
-  "cerebras": {
-    "envVar": "CEREBRAS_API_KEY",
-    "apiStyle": "openai-compat",
-    "baseUrl": "https://api.cerebras.ai/v1",
-    "defaultModel": "gpt-oss-120b",
-    "fallbackModels": ["qwen-3.8-27b"],
-    "tier": 1,
-    "signupUrl": "https://inference.cerebras.ai",
-    "freeTierNotes": "now a free TRIAL: $5 credit that expires 30 days after it is granted (card may be required); 5 RPM, 1M tokens/day per model while it lasts",
-    "limits": { "rpm": 5, "tpd": 1000000, "perModel": true, "scope": "account" },
-    "limitsSource": "official",
-    "trial": true,
-    "requiresCard": true,
-    "verifiedAt": "2026-10-07"
-  },
   "mistral": {
     "envVar": "MISTRAL_API_KEY",
     "apiStyle": "openai-compat",
@@ -147,19 +132,6 @@
     "dayReset": "midnight:UTC",
     "verifiedAt": "2026-10-07"
   },
-  "huggingface": {
-    "envVar": "HUGGINGFACE_API_KEY",
-    "apiStyle": "openai-compat",
-    "baseUrl": "https://router.huggingface.co/v1",
-    "defaultModel": "meta-llama/Llama-3.1-8B-Instruct",
-    "fallbackModels": [],
-    "tier": 3,
-    "signupUrl": "https://huggingface.co/settings/tokens",
-    "freeTierNotes": "only about $0.10/month of free inference credit now; backend varies by model",
-    "limits": { "scope": "account" },
-    "limitsSource": "tracker",
-    "verifiedAt": "2026-10-07"
-  },
   "cohere": {
     "envVar": "COHERE_API_KEY",
     "apiStyle": "openai-compat",
@@ -173,33 +145,6 @@
     "limitsSource": "tracker",
     "commercialOk": false,
     "costPerMillionTokens": 0.15,
-    "verifiedAt": "2026-10-07"
-  },
-  "together": {
-    "envVar": "TOGETHER_API_KEY",
-    "apiStyle": "openai-compat",
-    "baseUrl": "https://api.together.xyz/v1",
-    "defaultModel": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-    "fallbackModels": [],
-    "tier": 4,
-    "signupUrl": "https://api.together.xyz",
-    "freeTierNotes": "signup credit only (not a standing free tier)",
-    "limitsSource": "unverified",
-    "trial": true
-  },
-  "sambanova": {
-    "envVar": "SAMBANOVA_API_KEY",
-    "apiStyle": "openai-compat",
-    "baseUrl": "https://api.sambanova.ai/v1",
-    "defaultModel": "Meta-Llama-3.3-70B-Instruct",
-    "fallbackModels": [],
-    "tier": 4,
-    "signupUrl": "https://cloud.sambanova.ai",
-    "freeTierNotes": "tightened in 2026: trial credit, and a payment method is now reportedly required; ~20 RPM / 200K tokens/day on trial models",
-    "limits": { "rpm": 20, "tpd": 200000, "scope": "account" },
-    "limitsSource": "tracker",
-    "trial": true,
-    "requiresCard": true,
     "verifiedAt": "2026-10-07"
   },
   "pollinations": {
@@ -237,19 +182,6 @@
     "freeTierNotes": "EU-hosted open models; the API works without a key at a low rate (~12 RPM) but the cascade only uses providers it has a key for, so create a free account for a key. Model catalogue rotates",
     "limits": { "rpm": 12, "scope": "ip" },
     "limitsSource": "tracker",
-    "verifiedAt": "2026-10-07"
-  },
-  "llm7": {
-    "envVar": "LLM7_API_KEY",
-    "apiStyle": "openai-compat",
-    "baseUrl": "https://api.llm7.io/v1",
-    "defaultModel": "gpt-oss:20b",
-    "fallbackModels": ["gemma4:31b", "nemotron-3-nano:30b"],
-    "tier": 4,
-    "signupUrl": "https://token.llm7.io",
-    "freeTierNotes": "UNVERIFIED free tier: a tracker says ~30 RPM with a free token, but the live model list shows per-token prices and 'turbo'/'pro' tiers. The three default models are the 'turbo' tier. Check what your token is allowed to use before relying on it",
-    "limits": { "rpm": 30, "scope": "account" },
-    "limitsSource": "unverified",
     "verifiedAt": "2026-10-07"
   },
   "deepseek": {

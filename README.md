@@ -9,12 +9,12 @@ rate-limited key rests for exactly as long as the provider says, and a limit
 that is per model falls to the next model on the same key before leaving the
 provider.
 
-Zero dependencies. Node 18+. One `generate()` call, 20 providers known out of the box.
+Zero dependencies. Node 18+. One `generate()` call, 15 providers known out of the box.
 
 ```js
 const { LLMCascade } = require('llm-free-cascade');
 
-const cascade = LLMCascade.fromEnv(); // GROQ_API_KEY, GEMINI_API_KEY, CEREBRAS_API_KEY, ...
+const cascade = LLMCascade.fromEnv(); // GROQ_API_KEY, GEMINI_API_KEY, MISTRAL_API_KEY, ...
 
 const { text, provider, attempts } = await cascade.generate({
   system: 'You are a helpful assistant.',
@@ -55,16 +55,15 @@ npm install llm-free-cascade
 ```text
 $ npx llm-free-cascade status
 
-llm-free-cascade — 5 provider(s) configured, in this order:
+llm-free-cascade — 3 provider(s) configured, in this order:
 
    1. groq         2 key(s)  [tier 1]
       models: openai/gpt-oss-120b -> qwen/qwen3.8-27b -> openai/gpt-oss-20b
       limits: 30 RPM, 1000 RPD, 8000 TPM, 200000 TPD, per model, per organization
    2. gemini       1 key(s)  [tier 1, may train on your prompts]
       models: gemini-3.6-flash
-   3. cerebras     1 key(s)  [tier 1, trial/credit, not a standing free tier, needs card]
-      models: gpt-oss-120b -> qwen-3.8-27b
-   ...
+   3. mistral      1 key(s)  [tier 2]
+      models: mistral-small-latest
 ```
 
 ```bash
@@ -107,7 +106,7 @@ as their API key. Details: [Guide → OpenAI-compatible server](docs/GUIDE.md#op
 new LLMCascade({ keys: { gemini: [key1, key2] } });
 
 // Pick and order the chain
-new LLMCascade({ keys: { ... }, order: ['groq', 'cerebras', 'gemini'] });
+new LLMCascade({ keys: { ... }, order: ['groq', 'mistral', 'gemini'] });
 
 // Bound latency: 8 s per attempt, 25 s for the whole call
 new LLMCascade({ keys: { ... }, timeoutMs: 8000, deadlineMs: 25_000 });
@@ -156,10 +155,9 @@ carrying `code`, a suggested `statusCode` and redacted `failures`.
 
 ## Providers
 
-Groq, Google Gemini, Cerebras, Mistral, NVIDIA NIM, Z.ai (Zhipu), OpenRouter,
-SiliconFlow, ModelScope, Cloudflare Workers AI, Hugging Face, Cohere, Together,
-SambaNova, Pollinations, OpenCode Zen, OVHcloud, LLM7, plus DeepSeek and
-Anthropic as paid fallbacks. The full table with limits, caveats and signup
+Groq, Google Gemini, Mistral, NVIDIA NIM, Z.ai (Zhipu), OpenRouter, SiliconFlow,
+ModelScope, Cloudflare Workers AI, Cohere, Pollinations, OpenCode Zen, OVHcloud,
+plus DeepSeek and Anthropic as paid fallbacks. The full table with limits, caveats and signup
 links is on the [project page](https://rcgiri-physics.github.io/llm-free-cascade/)
 and in the [guide](docs/GUIDE.md#supported-providers).
 

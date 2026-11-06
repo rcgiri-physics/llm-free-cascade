@@ -18,7 +18,7 @@
 const { PROVIDER_INFO } = require('../src/index.js');
 
 // Providers whose model list is public (no key needed).
-const KEYLESS = new Set(['openrouter', 'ovh', 'llm7', 'modelscope', 'pollinations']);
+const KEYLESS = new Set(['openrouter', 'ovh', 'modelscope', 'pollinations']);
 // Providers with no OpenAI-style GET {baseUrl}/models listing.
 const NO_LISTING = new Set(['cloudflare']);
 

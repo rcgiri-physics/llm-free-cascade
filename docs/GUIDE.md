@@ -83,7 +83,7 @@ const { text, parsed, provider } = await cascade.generate({
 ```js
 const cascade = new LLMCascade({
   keys: { ... },
-  order: ['groq', 'cerebras', 'gemini'], // only these three, in this order
+  order: ['groq', 'mistral', 'gemini'], // only these three, in this order
 });
 ```
 
@@ -95,7 +95,7 @@ configured key are dropped, and it falls back to the instance's default order
 if the override ends up empty:
 
 ```js
-await cascade.generate({ system, user, order: ['cerebras', 'groq'] }); // just this call
+await cascade.generate({ system, user, order: ['mistral', 'groq'] }); // just this call
 ```
 
 ## Overriding models, and model fallbacks
@@ -306,7 +306,7 @@ A fast provider can be given a shorter leash than a slow one with
 `providerTimeoutMs` (a `timeoutMs` passed to `generate()` still wins):
 
 ```js
-const cascade = new LLMCascade({ keys: { ... }, providerTimeoutMs: { groq: 10_000, cerebras: 10_000 } });
+const cascade = new LLMCascade({ keys: { ... }, providerTimeoutMs: { groq: 10_000, mistral: 10_000 } });
 ```
 
 Per-attempt timeouts still let a bad day add up (15 providers × 30s). To
@@ -478,7 +478,7 @@ of a free one.
 
 From a checkout, `npm run check:providers` asks each provider's model-list
 endpoint (no tokens, no quota) whether the default and fallback models still
-exist. OpenRouter, ModelScope, OVHcloud, LLM7 and Pollinations list models
+exist. OpenRouter, ModelScope, OVHcloud and Pollinations list models
 without a key; for the others it uses the key from your environment.
 
 ## Custom providers and gateways
@@ -655,7 +655,6 @@ The default order is the file's order, sorted by **tier** (1 = fast and roomy,
 |---|---|---|---|
 | 1 | Groq | `GROQ_API_KEY` | console.groq.com. Per model: 30 RPM, 1K req/day, 200K tokens/day, per organization |
 | 1 | Google Gemini | `GEMINI_API_KEY` | aistudio.google.com. Per project and per model, daily reset at midnight Pacific; free prompts may train Google's models |
-| 1 | Cerebras | `CEREBRAS_API_KEY` | inference.cerebras.ai. Now a **$5 trial that expires in 30 days** |
 | 2 | Mistral | `MISTRAL_API_KEY` | console.mistral.ai. ~1 req/s, big monthly pool; phone + data-training opt-in |
 | 2 | NVIDIA NIM | `NVIDIA_API_KEY` | build.nvidia.com. ~40 RPM, prototyping only |
 | 2 | Z.ai (Zhipu) | `ZHIPU_API_KEY` | z.ai. GLM-4.7-Flash / 4.5-Flash free, no expiry |
@@ -663,14 +662,10 @@ The default order is the file's order, sorted by **tier** (1 = fast and roomy,
 | 3 | SiliconFlow | `SILICONFLOW_API_KEY` | siliconflow.com. A few small models free; China-hosted |
 | 3 | ModelScope | `MODELSCOPE_API_KEY` | modelscope.cn. ~2,000 req/day; China-hosted, may need a phone |
 | 3 | Cloudflare Workers AI | `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | dash.cloudflare.com. 10K neurons/day, small context |
-| 3 | Hugging Face | `HUGGINGFACE_API_KEY` | huggingface.co/settings/tokens. Only ~$0.10/month now |
 | 3 | Cohere | `COHERE_API_KEY` | dashboard.cohere.com/api-keys. **Non-commercial only** |
-| 4 | Together AI | `TOGETHER_API_KEY` | api.together.xyz. Signup credit only |
-| 4 | SambaNova | `SAMBANOVA_API_KEY` | cloud.sambanova.ai. Trial; payment method now required |
 | 4 | Pollinations | `POLLINATIONS_API_KEY` | auth.pollinations.ai. Anonymous at 1 req/15s, but the cascade only includes a provider it has a key for |
 | 4 | OpenCode Zen | `OPENCODE_API_KEY` | opencode.ai/zen |
 | 4 | OVHcloud AI Endpoints | `OVH_AI_ENDPOINTS_API_KEY` | endpoints.ai.cloud.ovh.net. EU-hosted, ~12 RPM |
-| 4 | LLM7 | `LLM7_API_KEY` | token.llm7.io. Free tier **unverified** (its model list shows prices) |
 | 5 | DeepSeek (paid) | `DEEPSEEK_API_KEY` | platform.deepseek.com. Cheapest sensible paid fallback |
 | 5 | Anthropic (paid) | `ANTHROPIC_API_KEY` | console.anthropic.com |
 

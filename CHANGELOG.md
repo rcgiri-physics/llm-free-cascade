@@ -2,6 +2,13 @@
 
 ## 0.11.0
 
+### Removed
+- **Cerebras, SambaNova, Together, Hugging Face and LLM7**, which no longer offer
+  a usable standing free tier (or, for LLM7, one that could be verified). Their
+  `*_API_KEY` variables are now ignored. Any of them can still join the chain as
+  a custom provider:
+  `custom: { cerebras: { baseUrl: 'https://api.cerebras.ai/v1', model: '<model>', apiKey } }`
+
 ### Changed
 - **Failures are classified by HTTP status first**, then by error text. A 400,
   413 or 422 about one request now skips the provider for that call instead of

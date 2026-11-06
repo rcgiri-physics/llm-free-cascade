@@ -1,5 +1,5 @@
 // node examples/basic.js
-// Requires at least one of GEMINI_API_KEY / GROQ_API_KEY / CEREBRAS_API_KEY etc. set.
+// Requires at least one of GEMINI_API_KEY / GROQ_API_KEY / MISTRAL_API_KEY etc. set.
 'use strict';
 
 const { LLMCascade } = require('../src/index.js');

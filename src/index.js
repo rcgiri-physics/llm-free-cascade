@@ -657,7 +657,7 @@ async function callGemini(opts) {
   return { text, usage: normalizeUsage(data.usageMetadata), finishReason: GEMINI_FINISH[finish] || (finish ? 'other' : undefined) };
 }
 
-/** Shared OpenAI-compatible caller (Groq, Cerebras, SambaNova, Mistral, OpenRouter, Together, DeepSeek, Cohere, HF, Cloudflare). */
+/** Shared OpenAI-compatible caller (Groq, Mistral, OpenRouter, DeepSeek, Cohere, Cloudflare, ...). */
 async function callOpenAICompat(opts) {
   const { baseUrl, apiKey, provider, extraHeaders, attemptTimeoutMs } = opts;
   const data = await fetchJson(provider, `${baseUrl}/chat/completions`, {

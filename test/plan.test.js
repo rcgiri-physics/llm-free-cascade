@@ -140,7 +140,7 @@ test('a rate-limited key is skipped on later calls instead of costing a request 
 
 test('a 429 on the first model falls to the next model on the same provider before leaving it', async (t) => {
   const calls = fakeFetch(t, ({ body }) => (body.model === PROVIDER_INFO.groq.defaultModel ? errRes(429, 'rate limit') : okRes('from fallback model')));
-  const cascade = new LLMCascade({ keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'] });
+  const cascade = new LLMCascade({ keys: { groq: 'k1', nvidia: 'k2' }, order: ['groq', 'nvidia'] });
   const result = await cascade.generate({ system: 's', user: 'u' });
   assert.equal(result.provider, 'groq');
   assert.equal(result.text, 'from fallback model');
@@ -201,7 +201,7 @@ test('Retry-After sets the cooldown of a rate-limited provider', async (t) => {
   fakeFetch(t, ({ url }) => (url.includes('groq') ? errRes(429, 'rate limit', { 'retry-after': '7' }) : okRes()));
   const cooled = [];
   const cascade = new LLMCascade({
-    keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'], models: { groq: 'm', cerebras: 'm' },
+    keys: { groq: 'k1', nvidia: 'k2' }, order: ['groq', 'nvidia'], models: { groq: 'm', nvidia: 'm' },
     onProviderCooldown: (p, ms) => cooled.push([p, ms]),
   });
   await cascade.generate({ system: 's', user: 'u' });
@@ -214,7 +214,7 @@ test('a "try again in 2m59.5s" hint inside the error text is honoured too', asyn
   fakeFetch(t, ({ url }) => (url.includes('groq') ? errRes(429, 'Rate limit reached. Please try again in 2m59.5s.') : okRes()));
   const cooled = [];
   const cascade = new LLMCascade({
-    keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'], models: { groq: 'm', cerebras: 'm' },
+    keys: { groq: 'k1', nvidia: 'k2' }, order: ['groq', 'nvidia'], models: { groq: 'm', nvidia: 'm' },
     onProviderCooldown: (p, ms) => cooled.push([p, ms]),
   });
   await cascade.generate({ system: 's', user: 'u' });
@@ -224,25 +224,25 @@ test('a "try again in 2m59.5s" hint inside the error text is honoured too', asyn
 test('a per-minute limit with no hint cools for a minute; a per-day limit waits for the reset', async (t) => {
   fakeFetch(t, ({ url }) => {
     if (url.includes('groq')) return errRes(429, 'limit reached on requests per minute (RPM)');
-    if (url.includes('cerebras')) return errRes(429, 'limit reached on tokens per day (TPD)');
+    if (url.includes('nvidia')) return errRes(429, 'limit reached on tokens per day (TPD)');
     return okRes();
   });
   const cooled = {};
   const cascade = new LLMCascade({
-    keys: { groq: 'k1', cerebras: 'k2', mistral: 'k3' }, order: ['groq', 'cerebras', 'mistral'],
-    models: { groq: 'm', cerebras: 'm', mistral: 'm' },
+    keys: { groq: 'k1', nvidia: 'k2', mistral: 'k3' }, order: ['groq', 'nvidia', 'mistral'],
+    models: { groq: 'm', nvidia: 'm', mistral: 'm' },
     onProviderCooldown: (p, ms) => { cooled[p] = ms; },
   });
   await cascade.generate({ system: 's', user: 'u' });
   near(cooled.groq, 60 * 1000, 'per-minute limit');
-  near(cooled.cerebras, 60 * 60 * 1000, 'rolling daily window with no clock reset is re-checked hourly');
+  near(cooled.nvidia, 60 * 60 * 1000, 'rolling daily window with no clock reset is re-checked hourly');
 });
 
 test('rateLimitCooldownMs, when set, pins the 429 cooldown and overrides hints', async (t) => {
   fakeFetch(t, ({ url }) => (url.includes('groq') ? errRes(429, 'rate limit', { 'retry-after': '500' }) : okRes()));
   const cooled = [];
   const cascade = new LLMCascade({
-    keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'], models: { groq: 'm', cerebras: 'm' },
+    keys: { groq: 'k1', nvidia: 'k2' }, order: ['groq', 'nvidia'], models: { groq: 'm', nvidia: 'm' },
     rateLimitCooldownMs: 1234, onProviderCooldown: (p, ms) => cooled.push([p, ms]),
   });
   await cascade.generate({ system: 's', user: 'u' });
@@ -257,13 +257,13 @@ test('a prompt that is too long for one provider skips it for this call but does
   fakeFetch(t, ({ url }) => (url.includes('groq') ? errRes(400, 'This model\'s maximum context length is 8192 tokens') : okRes()));
   const cooled = [];
   const cascade = new LLMCascade({
-    keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'], models: { groq: 'm', cerebras: 'm' },
+    keys: { groq: 'k1', nvidia: 'k2' }, order: ['groq', 'nvidia'], models: { groq: 'm', nvidia: 'm' },
     onProviderCooldown: (p) => cooled.push(p),
   });
   const result = await cascade.generate({ system: 's', user: 'u' });
-  assert.equal(result.provider, 'cerebras');
+  assert.equal(result.provider, 'nvidia');
   assert.deepEqual(cooled, []);
-  assert.deepEqual(await cascade.getLiveOrder(), ['groq', 'cerebras']);
+  assert.deepEqual(await cascade.getLiveOrder(), ['groq', 'nvidia']);
 });
 
 test('circuit breaker: two timeouts/network errors in a row bench a provider, so later calls skip it', async (t) => {
@@ -273,7 +273,7 @@ test('circuit breaker: two timeouts/network errors in a row bench a provider, so
   });
   const cooled = [];
   const cascade = new LLMCascade({
-    keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'], models: { groq: 'm', cerebras: 'm' },
+    keys: { groq: 'k1', nvidia: 'k2' }, order: ['groq', 'nvidia'], models: { groq: 'm', nvidia: 'm' },
     breakerMs: 5000, onProviderCooldown: (p, ms) => cooled.push([p, ms]),
   });
   for (let i = 0; i < 4; i++) await cascade.generate({ system: 's', user: 'u' });
@@ -287,7 +287,7 @@ test('breakerMs: 0 turns the circuit breaker off', async (t) => {
     return okRes();
   });
   const cascade = new LLMCascade({
-    keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'], models: { groq: 'm', cerebras: 'm' }, breakerMs: 0,
+    keys: { groq: 'k1', nvidia: 'k2' }, order: ['groq', 'nvidia'], models: { groq: 'm', nvidia: 'm' }, breakerMs: 0,
   });
   for (let i = 0; i < 4; i++) await cascade.generate({ system: 's', user: 'u' });
   assert.equal(calls.filter((c) => c.url.includes('groq')).length, 4);
@@ -300,7 +300,7 @@ test('a success resets the failure streak, so scattered blips never trip the bre
     return okRes();
   });
   const cascade = new LLMCascade({
-    keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'], models: { groq: 'm', cerebras: 'm' },
+    keys: { groq: 'k1', nvidia: 'k2' }, order: ['groq', 'nvidia'], models: { groq: 'm', nvidia: 'm' },
   });
   for (let i = 0; i < 6; i++) await cascade.generate({ system: 's', user: 'u' });
   assert.ok(calls.filter((c) => c.url.includes('groq')).length >= 4, 'groq stays in rotation');
@@ -432,22 +432,22 @@ test('onAttempt fires for every key × model attempt, with redacted errors and n
 });
 
 test('adaptiveOrder moves the faster provider ahead within a tier, but only once there are enough samples', async () => {
-  const keys = { groq: 'k1', cerebras: 'k2', deepseek: 'k3' }; // groq & cerebras are tier 1, deepseek tier 5
+  const keys = { groq: 'k1', gemini: 'k2', deepseek: 'k3' }; // groq & gemini are tier 1, deepseek tier 5
   const plain = new LLMCascade({ keys });
   const adaptive = new LLMCascade({ keys, adaptiveOrder: true });
   const feed = (c, provider, ms, n) => { for (let i = 0; i < n; i++) c._recordAttempt(provider, { keyIndex: 0, model: 'm' }, { ok: true, ms }); };
 
   feed(adaptive, 'groq', 900, 2);
-  feed(adaptive, 'cerebras', 100, 2);
-  assert.deepEqual(await adaptive.getLiveOrder(), ['groq', 'cerebras', 'deepseek'], 'too few samples: keep the listed order');
+  feed(adaptive, 'gemini', 100, 2);
+  assert.deepEqual(await adaptive.getLiveOrder(), ['groq', 'gemini', 'deepseek'], 'too few samples: keep the listed order');
 
   feed(adaptive, 'groq', 900, 2);
-  feed(adaptive, 'cerebras', 100, 2);
-  assert.deepEqual(await adaptive.getLiveOrder(), ['cerebras', 'groq', 'deepseek'], 'faster provider first, paid provider stays last');
+  feed(adaptive, 'gemini', 100, 2);
+  assert.deepEqual(await adaptive.getLiveOrder(), ['gemini', 'groq', 'deepseek'], 'faster provider first, paid provider stays last');
 
   feed(plain, 'groq', 900, 4);
-  feed(plain, 'cerebras', 100, 4);
-  assert.deepEqual(await plain.getLiveOrder(), ['groq', 'cerebras', 'deepseek'], 'off by default');
+  feed(plain, 'gemini', 100, 4);
+  assert.deepEqual(await plain.getLiveOrder(), ['groq', 'gemini', 'deepseek'], 'off by default');
 });
 
 test('probe(): one tiny request per configured key, reporting who answered and who did not', async (t) => {

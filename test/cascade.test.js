@@ -15,7 +15,7 @@ test('throws when no provider is configured', async () => {
 test('order filters to only providers with a key', async () => {
   const cascade = new LLMCascade({
     keys: { groq: 'k1', gemini: 'k2' },
-    order: ['gemini', 'groq', 'cerebras'],
+    order: ['gemini', 'groq', 'nvidia'],
   });
   assert.deepEqual(await cascade._liveOrder(), ['gemini', 'groq']);
 });
@@ -99,8 +99,8 @@ test('a slow provider times out and the cascade falls over to the next one', asy
   });
 
   const cascade = new LLMCascade({
-    keys: { groq: 'k1', cerebras: 'k2' },
-    order: ['groq', 'cerebras'],
+    keys: { groq: 'k1', nvidia: 'k2' },
+    order: ['groq', 'nvidia'],
     timeoutMs: 20,
   });
   await assert.rejects(
@@ -146,8 +146,8 @@ test('a custom cooldownStore is used instead of the in-memory default', async (t
     set: (p, until) => { store.set(p, until); },
   };
   const cascade = new LLMCascade({
-    keys: { groq: 'k1', cerebras: 'k2' },
-    order: ['groq', 'cerebras'],
+    keys: { groq: 'k1', nvidia: 'k2' },
+    order: ['groq', 'nvidia'],
     cooldownStore,
   });
 
@@ -197,9 +197,9 @@ test('streaming falls over to the next provider if the first one fails before an
     return sseResponse(['ok', '[DONE]']);
   };
 
-  const cascade = new LLMCascade({ keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'] });
+  const cascade = new LLMCascade({ keys: { groq: 'k1', nvidia: 'k2' }, order: ['groq', 'nvidia'] });
   const { provider, stream } = await cascade.generate({ system: 's', user: 'u', stream: true });
-  assert.equal(provider, 'cerebras');
+  assert.equal(provider, 'nvidia');
   assert.deepEqual(await collect(stream), ['ok']);
 });
 
@@ -303,14 +303,14 @@ test('a provider that sends headers then stalls the body times out and falls ove
         json: () => new Promise((_, reject) => signal.addEventListener('abort', () => reject(abortError()))),
       };
     }
-    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'from cerebras' } }] }) };
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'from nvidia' } }] }) };
   };
 
-  const cascade = new LLMCascade({ keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'], timeoutMs: 30 });
+  const cascade = new LLMCascade({ keys: { groq: 'k1', nvidia: 'k2' }, order: ['groq', 'nvidia'], timeoutMs: 30 });
   const failures = [];
   cascade.onProviderFailure = (p, m) => failures.push(`${p}: ${m}`);
   const result = await cascade.generate({ system: 's', user: 'u' });
-  assert.equal(result.provider, 'cerebras');
+  assert.equal(result.provider, 'nvidia');
   assert.match(failures[0], /groq network error: timed out after 30ms/);
 });
 
@@ -367,9 +367,9 @@ test('streaming: an empty stream counts as a failure and falls over to the next 
   let calls = 0;
   global.fetch = async () => (++calls === 1 ? sseResponse(['[DONE]']) : sseResponse(['ok', '[DONE]']));
 
-  const cascade = new LLMCascade({ keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'] });
+  const cascade = new LLMCascade({ keys: { groq: 'k1', nvidia: 'k2' }, order: ['groq', 'nvidia'] });
   const { provider, stream } = await cascade.generate({ system: 's', user: 'u', stream: true });
-  assert.equal(provider, 'cerebras');
+  assert.equal(provider, 'nvidia');
   assert.deepEqual(await collect(stream), ['ok']);
 });
 
@@ -402,8 +402,8 @@ test('deadlineMs bounds the whole call and throws DEADLINE_EXCEEDED (504) with t
   };
 
   const cascade = new LLMCascade({
-    keys: { groq: 'k1', cerebras: 'k2', gemini: 'k3' },
-    order: ['groq', 'cerebras', 'gemini'],
+    keys: { groq: 'k1', nvidia: 'k2', gemini: 'k3' },
+    order: ['groq', 'nvidia', 'gemini'],
     timeoutMs: 1000,
     deadlineMs: 50,
   });
@@ -452,9 +452,9 @@ test('a 401 on one provider cools it down when another provider is still live', 
   global.fetch = async () => ({ ok: false, status: 401, json: async () => ({ error: { message: 'invalid api key' } }) });
 
   const cooled = [];
-  const cascade = new LLMCascade({ keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'], onProviderCooldown: (p, ms) => cooled.push([p, ms]) });
+  const cascade = new LLMCascade({ keys: { groq: 'k1', nvidia: 'k2' }, order: ['groq', 'nvidia'], onProviderCooldown: (p, ms) => cooled.push([p, ms]) });
   await assert.rejects(() => cascade.generate({ system: 's', user: 'u' }));
-  assert.deepEqual(cooled, [['groq', 10 * 60 * 1000]]); // cerebras is last-standing, never cooled
+  assert.deepEqual(cooled, [['groq', 10 * 60 * 1000]]); // nvidia is last-standing, never cooled
 });
 
 test('rateLimitCooldownMs is used for 429s, cooldownMs for structural failures', async (t) => {
@@ -467,15 +467,15 @@ test('rateLimitCooldownMs is used for 429s, cooldownMs for structural failures',
 
   const cooled = [];
   const cascade = new LLMCascade({
-    keys: { groq: 'k1', cerebras: 'k2', gemini: 'k3' },
-    order: ['groq', 'cerebras', 'gemini'],
-    models: { groq: 'm1', cerebras: 'm2', gemini: 'm3' }, // pinned: no fallback models, so each provider is one attempt
+    keys: { groq: 'k1', nvidia: 'k2', gemini: 'k3' },
+    order: ['groq', 'nvidia', 'gemini'],
+    models: { groq: 'm1', nvidia: 'm2', gemini: 'm3' }, // pinned: no fallback models, so each provider is one attempt
     cooldownMs: 5000,
     rateLimitCooldownMs: 100,
     onProviderCooldown: (p, ms) => cooled.push([p, ms]),
   });
   await assert.rejects(() => cascade.generate({ system: 's', user: 'u' }));
-  assert.deepEqual(cooled, [['groq', 100], ['cerebras', 5000]]);
+  assert.deepEqual(cooled, [['groq', 100], ['nvidia', 5000]]);
 });
 
 test('maxTokensLimit clamps a caller-supplied maxTokens; nonsense values fall back to the default', async (t) => {
@@ -496,15 +496,15 @@ test('cooldownStore.getMany is preferred over per-provider get when present', as
   const gets = [];
   let manyCalls = 0;
   const cascade = new LLMCascade({
-    keys: { groq: 'k1', cerebras: 'k2' },
-    order: ['groq', 'cerebras'],
+    keys: { groq: 'k1', nvidia: 'k2' },
+    order: ['groq', 'nvidia'],
     cooldownStore: {
       get: (p) => { gets.push(p); return 0; },
       set: () => {},
       getMany: (providers) => { manyCalls++; return providers.map((p) => (p === 'groq' ? Date.now() + 60_000 : 0)); },
     },
   });
-  assert.deepEqual(await cascade.getLiveOrder(), ['cerebras']);
+  assert.deepEqual(await cascade.getLiveOrder(), ['nvidia']);
   assert.equal(manyCalls, 1);
   assert.deepEqual(gets, []);
 });
@@ -625,14 +625,14 @@ test('a per-call order overrides the instance default for just that call', async
   t.after(() => { global.fetch = originalFetch; });
   const calledProviders = [];
   global.fetch = async (url) => {
-    calledProviders.push(url.includes('cerebras') ? 'cerebras' : 'groq');
+    calledProviders.push(url.includes('nvidia') ? 'nvidia' : 'groq');
     return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'hi' } }] }) };
   };
 
-  const cascade = new LLMCascade({ keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'] });
-  const result = await cascade.generate({ system: 's', user: 'u', order: ['cerebras'] });
-  assert.equal(result.provider, 'cerebras');
-  assert.deepEqual(calledProviders, ['cerebras']);
+  const cascade = new LLMCascade({ keys: { groq: 'k1', nvidia: 'k2' }, order: ['groq', 'nvidia'] });
+  const result = await cascade.generate({ system: 's', user: 'u', order: ['nvidia'] });
+  assert.equal(result.provider, 'nvidia');
+  assert.deepEqual(calledProviders, ['nvidia']);
 });
 
 test('a per-call order drops providers without a configured key', async (t) => {
@@ -641,7 +641,7 @@ test('a per-call order drops providers without a configured key', async (t) => {
   global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'hi' } }] }) });
 
   const cascade = new LLMCascade({ keys: { groq: 'k1' }, order: ['groq'] });
-  const result = await cascade.generate({ system: 's', user: 'u', order: ['cerebras', 'groq'] });
+  const result = await cascade.generate({ system: 's', user: 'u', order: ['nvidia', 'groq'] });
   assert.equal(result.provider, 'groq');
 });
 
@@ -653,9 +653,9 @@ test('attempts lists every provider tried and skipped before the winner, empty o
     ? { ok: false, status: 500, json: async () => ({ error: { message: 'no content' } }) }
     : { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'hi' } }] }) });
 
-  const cascade = new LLMCascade({ keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'] });
+  const cascade = new LLMCascade({ keys: { groq: 'k1', nvidia: 'k2' }, order: ['groq', 'nvidia'] });
   const result = await cascade.generate({ system: 's', user: 'u' });
-  assert.equal(result.provider, 'cerebras');
+  assert.equal(result.provider, 'nvidia');
   assert.equal(result.attempts.length, 1);
   assert.equal(result.attempts[0].provider, 'groq');
 
@@ -673,20 +673,20 @@ test('attempts is also present on a streaming result', async (t) => {
     ? { ok: false, status: 500, json: async () => ({ error: { message: 'no content' } }) }
     : sseResponse(['ok', '[DONE]']));
 
-  const cascade = new LLMCascade({ keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'] });
+  const cascade = new LLMCascade({ keys: { groq: 'k1', nvidia: 'k2' }, order: ['groq', 'nvidia'] });
   const { provider, stream, attempts } = await cascade.generate({ system: 's', user: 'u', stream: true });
-  assert.equal(provider, 'cerebras');
+  assert.equal(provider, 'nvidia');
   assert.equal(attempts.length, 1);
   await collect(stream);
 });
 
 test('clearCooldown lets a caller manually end a provider\'s cooldown early', async () => {
-  const cascade = new LLMCascade({ keys: { groq: 'k1', cerebras: 'k2' }, order: ['groq', 'cerebras'] });
+  const cascade = new LLMCascade({ keys: { groq: 'k1', nvidia: 'k2' }, order: ['groq', 'nvidia'] });
   await cascade.cooldownStore.set('groq', Date.now() + 60_000);
-  assert.deepEqual(await cascade.getLiveOrder(), ['cerebras']);
+  assert.deepEqual(await cascade.getLiveOrder(), ['nvidia']);
 
   await cascade.clearCooldown('groq');
-  assert.deepEqual(await cascade.getLiveOrder(), ['groq', 'cerebras']);
+  assert.deepEqual(await cascade.getLiveOrder(), ['groq', 'nvidia']);
 });
 
 test('shadowCostUsd is computed from usage and the provider\'s costPerMillionTokens, undefined otherwise', async (t) => {
